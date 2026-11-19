@@ -18,7 +18,7 @@ interface HttpCommand {
   headers?: Record<string, string>
 }
 
-interface LiveRecord {
+export interface LiveRecord {
   id: string
   name?: string
   username?: string
@@ -117,6 +117,8 @@ export interface UndoRedoController {
   readonly canRedo: boolean
   readonly history: readonly HistoryAction[]
   readonly knownRecordCodes: readonly string[]
+  /** Cached attendance records for export (id, student code, name, lesson). */
+  readonly attendanceRecords: readonly LiveRecord[]
   readonly lessonId: string | null
   setEnabled(enabled: boolean): void
   undo(): Promise<void>
@@ -339,16 +341,19 @@ function normaliseLiveRecord(raw: unknown, fallback?: Partial<LiveRecord>): Live
   if (id == null || id === '') return null
 
   const student = asObject(rawObj.student) ?? {}
-  const profile = asObject(student.student_profile) ?? {}
-  const username = student.username ?? rawObj.username ?? profile.student_code ?? fallback?.username ?? fallback?.studentCode
+  const profile = asObject(student.student_profile) ?? asObject(rawObj.student_profile) ?? {}
+  // The live list and the search endpoint use different shapes; accept both.
+  const flatCode = profile.student_code ?? rawObj.student_code ?? rawObj.code
+  const rawName = student.name ?? rawObj.name ?? fallback?.name
+  const username = student.username ?? rawObj.username ?? flatCode ?? fallback?.username ?? fallback?.studentCode
   const lessonId = toLessonId(rawObj.lesson_id) ?? fallback?.lessonId
   const source = toSource(rawObj.source) ?? fallback?.source
 
   return {
     id: String(id),
-    name: typeof student.name === 'string' ? student.name : fallback?.name,
+    name: typeof rawName === 'string' ? rawName : fallback?.name,
     username: username == null ? undefined : String(username),
-    studentCode: profile.student_code == null ? undefined : String(profile.student_code),
+    studentCode: flatCode == null ? undefined : String(flatCode),
     lessonId: lessonId == null ? null : lessonId,
     source,
   }
@@ -1355,6 +1360,7 @@ function createController(): UndoRedoController {
       }
       return Array.from(codes)
     },
+    get attendanceRecords() { return Array.from(records.values()) },
     get lessonId() { return currentLessonId },
     setEnabled(value: boolean) {
       if (enabled === value) return

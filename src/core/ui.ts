@@ -7,6 +7,7 @@ import { attachToaster, toast } from './toast'
 import { getUndoRedoController, type UndoRedoController } from './undoRedo'
 import {
   commitExamTyping,
+  diagnoseHomeworkButtons,
   featureStateSignature as evaluationFeatureStateSignature,
   getSelectedRow,
   handleSelectedRowKey,
@@ -32,6 +33,20 @@ import {
   type PaymentStatus,
   type PaymentOverride,
 } from './bulkAttendance'
+import {
+  parseEvaluationEntries,
+  matchIdentifier,
+  findRowForCode,
+  applyEvaluationToRow,
+  formatEvalLabel,
+  collectPageCandidates,
+  type ParseEvalResult,
+  type EvalNameRow,
+  type EvalRowResult,
+  type EvalRowStatus,
+  type EvalResolveStatus,
+  type EvalValues,
+} from './bulkEvaluation'
 import {
   loadShell,
   saveShell,
@@ -243,19 +258,19 @@ export function mountShell(): void {
                 <span class="feature-icon">${icons.toggles}</span>
                 <span class="bulk-item-text">
                   <strong>تقييم جماعي</strong>
-                  <small>إجراءات تقييم جماعية — سيتم تحديدها بعد التقاط سير العمل</small>
+                  <small>إدخال درجات امتحان/واجب لعدة طلاب في صفحة التقييم مع معاينة وتسليح وتراجع دفعة واحدة</small>
                 </span>
-                <span class="feature-badge off">قريبًا</span>
+                <span class="feature-badge on">متاح</span>
               </button>
 
-              <div class="bulk-item is-soon" aria-disabled="true">
-                <span class="feature-icon">${icons.history}</span>
+              <button type="button" class="bulk-item" data-bulk-open="export">
+                <span class="feature-icon">${icons.download}</span>
                 <span class="bulk-item-text">
-                  <strong>إجراء جماعي آخر</strong>
-                  <small>مساحة لإجراءات جماعية إضافية سيتم تصميمها لاحقًا</small>
+                  <strong>تصدير أكواد الحضور</strong>
+                  <small>الطلاب الحاضرون في الحصة: الكود والاسم — نسخ أو تنزيل ملف txt</small>
                 </span>
-                <span class="feature-badge off">قريبًا</span>
-              </div>
+                <span class="feature-badge on">متاح</span>
+              </button>
             </div>
           </div>
 
@@ -319,13 +334,95 @@ export function mountShell(): void {
             </div>
           </div>
 
+          <div class="bulk-detail" data-bulk-view="export" hidden>
+            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <div class="bulk-card" data-export-root>
+              <div class="bulk-head">
+                <span class="feature-icon">${icons.download}</span>
+                <span class="feature-titles">
+                  <strong>تصدير أكواد الحضور</strong>
+                  <small>قائمة الحاضرين في الحصة الحالية</small>
+                </span>
+                <span class="feature-badge off" data-export-count>0 طالب</span>
+              </div>
+
+              <p class="bulk-note">
+                كل سطر في الصيغة: كود الطالب، الاسم. الكود هو المعرّف المستخدم في تسجيل الحضور الجماعي. يمكن نسخ القائمة أو تنزيلها كملف نصي.
+              </p>
+
+              <div class="bulk-grid">
+                <label class="bulk-field">
+                  <span>رقم الحصة (الحالية افتراضيًا)</span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-export-lesson placeholder="مثال: 293" />
+                </label>
+                <div class="bulk-field">
+                  <span>السجلات المحفوظة</span>
+                  <div class="bulk-mode-toggle" data-export-summary>
+                    <span class="bulk-export-summary" data-export-summary-text>—</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bulk-actions export-actions">
+                <button type="button" class="action-btn" data-export-refresh>${icons.refresh}<span>تحديث القائمة</span></button>
+                <button type="button" class="action-btn" data-export-copy>${icons.copy}<span>نسخ</span></button>
+                <button type="button" class="action-btn bulk-run" data-export-download>${icons.download}<span>تنزيل txt</span></button>
+              </div>
+
+              <label class="bulk-field">
+                <span>النتيجة (كود الطالب, الاسم)</span>
+                <textarea class="bulk-textarea bulk-export-text" data-export-text rows="10" placeholder="2349, أحمد محمد"></textarea>
+              </label>
+
+              <p class="feature-note" data-export-hint>${icons.shieldAlert}
+                تُبنى القائمة من سجلات الحضور التي رصدها Tamperina في هذه الجلسة. إذا كانت فارغة، افتح صفحة الحضور وانتظر تحميل القائمة ثم اضغط تحديث.
+              </p>
+            </div>
+          </div>
+
           <div class="bulk-detail" data-bulk-view="evaluation" hidden>
             <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
-            <div class="empty">
-              ${icons.toggles}
-              <strong>التقييم الجماعي — قريبًا</strong>
-              <p>سيُضاف بعد تحديد الإجراءات المطلوبة (درجات، عبارات جاهزة، أو غيرها) والتقاط سير العمل الفعلي في صفحة التقييم.</p>
-              <span class="locked-note">${icons.lock} قيد التجهيز</span>
+            <div class="bulk-card" data-eval-bulk-root>
+              <div class="bulk-head">
+                <span class="feature-icon">${icons.toggles}</span>
+                <span class="feature-titles">
+                  <strong>تقييم جماعي</strong>
+                  <small>درجات امتحان وواجب (أكواد أو أسماء)</small>
+                </span>
+                <span class="feature-badge off" data-eval-badge>جاهز</span>
+              </div>
+
+              <p class="bulk-note">
+                كل سطر: <strong>المعرّف، القيمة</strong> أو <strong>المعرّف، قيمة، قيمة</strong>. المعرّف كود الطالب أو اسمه. <strong>رقم</strong> (مثل 9.5) = درجة امتحان، <strong>نص تقدير</strong> (مثل امتياز/جيد جدًا/مقبول) = درجة واجب. الترتيب مرن عند اختلاف النوع؛ إن وُجد رقمان معًا فستُطلب منك تحديد أيهما الامتحان وأيهما الواجب. إن أُرسلت قيمة واحدة فقط، تُترك الأخرى على الوضع الافتراضي للصفحة.
+              </p>
+
+              <label class="bulk-field">
+                <span>قائمة التقييم (سطر لكل طالب)</span>
+                <textarea class="bulk-textarea" data-eval-input rows="7" placeholder="2017, 9.5, امتياز&#10;أحمد محمد, جيد جدًا&#10;2018, 8"></textarea>
+              </label>
+
+              <div class="bulk-actions">
+                <button type="button" class="action-btn" data-eval-preview>${icons.toggles}<span>معاينة وتحليل</span></button>
+                <button type="button" class="action-btn" data-eval-arm disabled>${icons.lock}<span>تسليح التنفيذ</span></button>
+                <button type="button" class="action-btn bulk-run" data-eval-run disabled>${icons.play}<span>تنفيذ</span></button>
+                <button type="button" class="action-btn bulk-stop" data-eval-stop disabled>${icons.pause}<span>إيقاف</span></button>
+              </div>
+
+              <div class="bulk-preview" data-eval-preview-box>لم تتم المعاينة بعد.</div>
+              <div class="bulk-resolve" data-eval-resolve hidden></div>
+
+              <div class="history-head">
+                ${icons.history}
+                <strong>سجل التنفيذ</strong>
+                <small data-eval-log-count>0</small>
+              </div>
+              <div class="bulk-log" data-eval-log>
+                <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+              </div>
+
+              <p class="feature-note">${icons.shieldAlert}
+                يعمل على صفحة التقييم المحمّلة حاليًا ويطابق الطلاب من صفوف الجدول. التراجع بعد التنفيذ يلغي تغييرات الدفعة في خطوة واحدة (يتطلب تفعيل التراجع). الحفظ يعتمد على سلوك الصفحة وقد يحتاج تأكيدًا حيًا.
+              </p>
             </div>
           </div>
         </div>
@@ -869,6 +966,16 @@ export function mountShell(): void {
   const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
   const bulkModeBtns = Array.from(bulkRoot.querySelectorAll<HTMLButtonElement>('[data-bulk-mode-toggle] [data-mode]'))
 
+  // ---- bulk attendance export --------------------------------------------
+  const exportRoot = backdrop.querySelector<HTMLElement>('[data-export-root]')!
+  const exportLessonInput = exportRoot.querySelector<HTMLInputElement>('[data-export-lesson]')!
+  const exportTextarea = exportRoot.querySelector<HTMLTextAreaElement>('[data-export-text]')!
+  const exportCount = exportRoot.querySelector<HTMLElement>('[data-export-count]')!
+  const exportSummary = exportRoot.querySelector<HTMLElement>('[data-export-summary-text]')!
+  const exportRefreshBtn = exportRoot.querySelector<HTMLButtonElement>('[data-export-refresh]')!
+  const exportCopyBtn = exportRoot.querySelector<HTMLButtonElement>('[data-export-copy]')!
+  const exportDownloadBtn = exportRoot.querySelector<HTMLButtonElement>('[data-export-download]')!
+
   let bulkParsed: ParseEntriesResult | null = null
   let bulkNameRows: NameRow[] = []
   let bulkArmed = false
@@ -1044,6 +1151,17 @@ export function mountShell(): void {
       row.status !== 'resolved' && row.status !== 'dropped' && row.status !== 'walk-in')
   }
 
+  /**
+   * Rows shown in the top follow-up section. Ignored rows stay here (instead
+   * of being moved down with the decided ones) so the whole list can still be
+   * copied or registered as walk-ins. They remain excluded from the batch and
+   * from the arming gate — only their position/visibility changes.
+   */
+  function pendingNameRows(): NameRow[] {
+    return bulkNameRows.filter((row) =>
+      row.status !== 'resolved' && row.status !== 'walk-in')
+  }
+
   const WALKIN_DEFAULT_AMOUNT = 45
   const WALKIN_MAX_AMOUNT = 999999.99
 
@@ -1103,7 +1221,7 @@ export function mountShell(): void {
 
   /** Fill the page's own "طلاب جدد بدون كارت" form and submit it. */
   async function registerWalkInStudents(): Promise<void> {
-    const rows = unresolvedNameRows()
+    const rows = pendingNameRows()
     if (!rows.length) return
 
     const form = document.getElementById('walkInForm') as HTMLFormElement | null
@@ -1212,10 +1330,11 @@ export function mountShell(): void {
     if (bulkParsed && bulkPayMode === 'school') seedPaymentOverridesFromParsed()
 
     const nameRows = bulkNameRows
-    const notHandled = (row: NameRow): boolean =>
-      row.status !== 'resolved' && row.status !== 'dropped' && row.status !== 'walk-in'
-    const undecided = nameRows.filter(notHandled)
-    const decidedNames = nameRows.filter((row) => !notHandled(row))
+    // Ignored rows deliberately remain at the top with the unresolved ones so
+    // "نسخ" still includes them (e.g. ignore all, then copy to handle manually).
+    const undecided = pendingNameRows()
+    const decidedNames = nameRows.filter((row) =>
+      row.status === 'resolved' || row.status === 'walk-in')
     const codeItems = (bulkPayMode === 'school' && bulkParsed) ? bulkParsed.codes : []
     if (!nameRows.length && !codeItems.length) {
       bulkResolveBox.hidden = true
@@ -1244,13 +1363,37 @@ export function mountShell(): void {
       if ((row.status === 'ambiguous' || row.status === 'not-found' || row.status === 'too-many' || row.status === 'error' || row.status === 'resolved')
         && row.candidates.length) {
         const list = row.candidates.slice(0, 12)
-        choicesHtml = `<div class="bulk-resolve-choices">${list.map((c) => `
-          <button type="button" class="bulk-choice ${row.code === c.code && row.status === 'resolved' ? 'selected' : ''}"
+        const isChosen = (c: (typeof list)[number]): boolean => row.status === 'resolved'
+          && ((!!row.code && c.code === row.code) || (!row.code && c.name === row.studentName))
+        const choiceButton = (c: (typeof list)[number]): string => {
+          const chosen = isChosen(c)
+          return `<button type="button" class="bulk-choice ${chosen ? 'selected' : ''}"
             data-resolve-action="choose" data-key="${escapeBulk(row.key)}"
             data-id="${escapeBulk(c.id)}" data-code="${escapeBulk(c.code)}" data-name="${escapeBulk(c.name)}">
-            <span>${escapeBulk(c.name || 'طالب')}</span>
+            <span class="bulk-choice-label">
+              ${chosen ? '<span class="bulk-choice-mark">✓ المُختار — سيُسجَّل في الحضور</span>' : ''}
+              <span>${escapeBulk(c.name || 'طالب')}</span>
+            </span>
             <small>${escapeBulk(c.code || 'بدون كود')}</small>
-          </button>`).join('')}${row.candidates.length > 12 ? `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>` : ''}</div>`
+          </button>`
+        }
+        if (row.status === 'resolved') {
+          const chosen = list.filter(isChosen)
+          const others = list.filter((c) => !isChosen(c))
+          if (chosen.length) {
+            choicesHtml += `<div class="bulk-resolve-chosen-note">الطالب المُختار الذي سيُسجَّل:</div>
+              <div class="bulk-resolve-choices chosen-group">${chosen.map(choiceButton).join('')}</div>`
+          }
+          if (others.length) {
+            choicesHtml += `<div class="bulk-resolve-chosen-note muted">نتائج أخرى — غير مختارة (اضغط لتبديل الاختيار):</div>
+              <div class="bulk-resolve-choices other-group">${others.map(choiceButton).join('')}</div>`
+          }
+        } else {
+          choicesHtml = `<div class="bulk-resolve-choices">${list.map(choiceButton).join('')}</div>`
+        }
+        if (row.candidates.length > 12) {
+          choicesHtml += `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>`
+        }
       }
 
       const editHtml = row.status === 'dropped' || row.status === 'walk-in' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
@@ -1288,7 +1431,7 @@ export function mountShell(): void {
       html += `<div class="bulk-undecided-section">
         <div class="bulk-undecided-head">
           <div class="bulk-undecided-title">
-            <strong>طلاب غير محلولين</strong>
+            <strong>طلاب غير محلولين / مُتجاهَلين</strong>
             <span class="feature-badge busy">${undecided.length}</span>
           </div>
           <div class="bulk-resolve-actions">
@@ -1297,7 +1440,7 @@ export function mountShell(): void {
             <button type="button" class="bulk-mini-btn" data-walkin-toggle aria-expanded="${walkInPreviewOpen}">تسجيل طلاب جدد بدون كارت</button>
           </div>
         </div>
-        <div class="bulk-note-inline">يمكنك نسخهم للتعامل معهم يدويًا، أو تجاهلهم، أو تسجيلهم كطلاب جدد بدون كارت عبر نموذج الصفحة.</div>
+        <div class="bulk-note-inline">التجاهل يُبقي الاسم هنا ويُخرجه فقط من دفعة الحضور — يمكنك نسخ القائمة كاملة للتعامل معها يدويًا، أو تسجيل الأسماء كطلاب جدد عبر نموذج الصفحة.</div>
         <div class="bulk-walkin-panel" data-walkin-panel ${walkInPreviewOpen ? '' : 'hidden'}>
           <div class="bulk-warn">سيتم إنشاء طلاب جدد وتسجيل التحصيل في حصة المدرسة عبر نموذج الصفحة. هذه التسجيلات <strong>لا يمكن التراجع عنها</strong>، وستُستبعد من دفعة الحضور الحالية. المبلغ الافتراضي 45 ويمكن تعديله لكل طالب.</div>
           <div class="bulk-walkin-rows">
@@ -1706,6 +1849,11 @@ export function mountShell(): void {
   bulkCodesInput.addEventListener('input', invalidateBulkAnalysis)
   bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkAnalysis() })
 
+  exportRefreshBtn.addEventListener('click', refreshAttendanceExport)
+  exportCopyBtn.addEventListener('click', () => { void copyAttendanceExport() })
+  exportDownloadBtn.addEventListener('click', downloadAttendanceExport)
+  exportLessonInput.addEventListener('input', refreshAttendanceExport)
+
   function updateBulkInputPlaceholder(): void {
     if (bulkPayMode === 'school') {
       bulkCodesInput.placeholder = [
@@ -1802,30 +1950,28 @@ export function mountShell(): void {
   })
 
   bulkResolveBox.addEventListener('click', (event) => {
+    if ((event.target as Element).closest('[data-walkin-toggle]')) {
+      walkInPreviewOpen = !walkInPreviewOpen
+      renderBulkResolve()
+      return
+    }
+    if ((event.target as Element).closest('[data-walkin-cancel]')) {
+      walkInPreviewOpen = false
+      renderBulkResolve()
+      return
+    }
+    if ((event.target as Element).closest('[data-walkin-confirm]')) {
+      void registerWalkInStudents()
+      return
+    }
+
     const copyBtn = (event.target as Element).closest<HTMLButtonElement>('[data-bulk-copy-undecided]')
     if (copyBtn) {
-      const text = copyBtn.dataset.copyText || ''
-      const copy = async (): Promise<void> => {
-        try {
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(text)
-          } else {
-            const ta = document.createElement('textarea')
-            ta.value = text
-            ta.style.position = 'fixed'
-            ta.style.opacity = '0'
-            document.body.appendChild(ta)
-            ta.focus()
-            ta.select()
-            document.execCommand('copy')
-            ta.remove()
-          }
-          toast({ title: 'تم النسخ', description: 'تم نسخ الطلاب غير المحلولين.', variant: 'applied' })
-        } catch {
-          toast({ title: 'تعذّر النسخ', description: 'انسخهم يدويًا.', variant: 'warning' })
-        }
-      }
-      void copy()
+      void copyPlainText(
+        copyBtn.dataset.copyText || '',
+        'تم النسخ',
+        'تم نسخ قائمة الطلاب (بما فيها المتجاهَلون).',
+      )
       return
     }
 
@@ -1836,7 +1982,7 @@ export function mountShell(): void {
     if (action === 'drop-all') {
       let changed = false
       bulkNameRows = bulkNameRows.map((row) => {
-        if (row.status === 'resolved' || row.status === 'dropped') return row
+        if (row.status === 'resolved' || row.status === 'dropped' || row.status === 'walk-in') return row
         changed = true
         return { ...row, status: 'dropped' as const, message: 'تم التجاهل — سيتم إدخاله يدويًا.' }
       })
@@ -1907,11 +2053,640 @@ export function mountShell(): void {
   undoRedo.subscribe(() => {
     refreshBulkLesson()
     updateBulkButtons()
+    updateEvalBulkButtons()
   })
+
+  async function copyPlainText(text: string, title: string, description: string): Promise<void> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.focus()
+        ta.select()
+        document.execCommand('copy')
+        ta.remove()
+      }
+      toast({ title, description, variant: 'applied' })
+    } catch {
+      toast({ title: 'تعذّر النسخ', description: 'انسخ النص يدويًا من مربع النص.', variant: 'warning' })
+    }
+  }
+
+  function exportLessonId(): string {
+    return exportLessonInput.value.trim() || currentLessonIdFromPage() || undoRedo.lessonId || ''
+  }
+
+  function buildAttendanceExport(): { text: string, count: number, lesson: string, total: number } {
+    const lesson = exportLessonId()
+    const records = undoRedo.attendanceRecords
+    const seen = new Set<string>()
+    const lines: string[] = []
+    for (const record of records) {
+      const recordLesson = record.lessonId == null ? '' : String(record.lessonId)
+      if (lesson && recordLesson && recordLesson !== lesson) continue
+      const code = String(record.studentCode ?? record.username ?? '').trim().toUpperCase()
+      if (!code || seen.has(code)) continue
+      seen.add(code)
+      const name = String(record.name ?? '').trim()
+      lines.push(name ? `${code}, ${name}` : code)
+    }
+    lines.sort((a, b) => a.localeCompare(b, 'ar'))
+    return { text: lines.join('\n'), count: lines.length, lesson, total: records.length }
+  }
+
+  function refreshAttendanceExport(): void {
+    if (!exportLessonInput.value.trim()) {
+      const lesson = currentLessonIdFromPage() || undoRedo.lessonId || ''
+      if (lesson) exportLessonInput.value = String(lesson)
+    }
+    const { text, count, lesson, total } = buildAttendanceExport()
+    exportTextarea.value = text
+    exportCount.textContent = `${count} طالب`
+    exportCount.classList.toggle('off', count === 0)
+    exportCount.classList.toggle('on', count > 0)
+    exportSummary.textContent = lesson ? `حصة ${lesson} · ${total} سجل محفوظ` : `${total} سجل محفوظ`
+  }
+
+  async function copyAttendanceExport(): Promise<void> {
+    const text = exportTextarea.value.trim()
+    if (!text) {
+      toast({ title: 'لا توجد قائمة', description: 'لا توجد سجلات حضور لتصديرها.', variant: 'warning' })
+      return
+    }
+    await copyPlainText(text, 'تم النسخ', 'تم نسخ قائمة الحاضرين (الكود والاسم).')
+  }
+
+  function downloadAttendanceExport(): void {
+    const text = exportTextarea.value.trim()
+    if (!text) {
+      toast({ title: 'لا توجد قائمة', description: 'لا توجد سجلات حضور لتصديرها.', variant: 'warning' })
+      return
+    }
+    const lesson = exportLessonId() || 'all'
+    const filename = `attendance-ids-${lesson}-${new Date().toISOString().slice(0, 10)}.txt`
+    try {
+      // BOM keeps Arabic names readable when the file is opened in Windows Notepad.
+      const blob = new Blob(['\uFEFF', text, '\n'], { type: 'text/plain;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      link.style.display = 'none'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      toast({ title: 'تم التنزيل', description: filename, variant: 'applied' })
+    } catch {
+      toast({ title: 'تعذّر التنزيل', description: 'انسخ القائمة يدويًا من مربع النص.', variant: 'warning' })
+    }
+  }
+
+  // ---- bulk evaluation -----------------------------------------------------
+  const evalRoot = backdrop.querySelector<HTMLElement>('[data-eval-bulk-root]')!
+  const evalInput = evalRoot.querySelector<HTMLTextAreaElement>('[data-eval-input]')!
+  const evalPreviewBtn = evalRoot.querySelector<HTMLButtonElement>('[data-eval-preview]')!
+  const evalArmBtn = evalRoot.querySelector<HTMLButtonElement>('[data-eval-arm]')!
+  const evalRunBtn = evalRoot.querySelector<HTMLButtonElement>('[data-eval-run]')!
+  const evalStopBtn = evalRoot.querySelector<HTMLButtonElement>('[data-eval-stop]')!
+  const evalPreviewBox = evalRoot.querySelector<HTMLElement>('[data-eval-preview-box]')!
+  const evalResolveBox = evalRoot.querySelector<HTMLElement>('[data-eval-resolve]')!
+  const evalLog = evalRoot.querySelector<HTMLElement>('[data-eval-log]')!
+  const evalLogCount = evalRoot.querySelector<HTMLElement>('[data-eval-log-count]')!
+  const evalBadge = evalRoot.querySelector<HTMLElement>('[data-eval-badge]')!
+
+  type EvalNumberMap = 'exam-homework' | 'homework-exam'
+  interface EvalWorkRow {
+    key: string
+    raw: string
+    identifier: string
+    query: string
+    values: EvalValues
+    ambiguousNumbers: boolean
+    numberTokens?: [string, string]
+    numberMap?: EvalNumberMap
+    identityStatus: EvalResolveStatus
+    code?: string
+    studentName?: string
+    candidates: { code: string; name: string }[]
+    message?: string
+  }
+
+  let evalParsed: ParseEvalResult | null = null
+  let evalRows: EvalWorkRow[] = []
+  let evalArmed = false
+  let evalRunning = false
+  let evalStop = { stop: false }
+  let evalLogRows: EvalRowResult[] = []
+  let evalAnalysisToken = 0
+
+  function evalSupported(): boolean {
+    return isEvaluationPage()
+  }
+
+  function setEvalBadge(text: string, className: string): void {
+    evalBadge.textContent = text
+    evalBadge.className = `feature-badge ${className}`
+  }
+
+  function evalEffectiveValues(row: EvalWorkRow): EvalValues | null {
+    if (row.ambiguousNumbers) {
+      if (!row.numberMap || !row.numberTokens) return null
+      const [a, b] = row.numberTokens
+      return row.numberMap === 'exam-homework' ? { exam: a, homework: b } : { homework: a, exam: b }
+    }
+    return row.values
+  }
+
+  function evalRowReady(row: EvalWorkRow): boolean {
+    if (row.identityStatus === 'dropped') return false
+    if (!(row.identityStatus === 'ready' || row.identityStatus === 'resolved')) return false
+    if (!row.code) return false
+    if (row.ambiguousNumbers && !row.numberMap) return false
+    const v = evalEffectiveValues(row)
+    return !!(v && (v.exam != null || v.homework != null))
+  }
+
+  function evalNeedsDecision(row: EvalWorkRow): boolean {
+    if (row.identityStatus === 'dropped') return false
+    if (row.ambiguousNumbers && !row.numberMap) return true
+    return !['ready', 'resolved', 'dropped'].includes(row.identityStatus)
+  }
+
+  function evalExecutableRows(): EvalWorkRow[] {
+    const seen = new Set<string>()
+    return evalRows.filter((row) => {
+      if (!evalRowReady(row)) return false
+      const code = (row.code || '').toUpperCase()
+      if (!code || seen.has(code)) return false
+      seen.add(code)
+      return true
+    })
+  }
+
+  function renderEvalLog(): void {
+    evalLogCount.textContent = String(evalLogRows.length)
+    if (!evalLogRows.length) {
+      evalLog.innerHTML = `<div class="history-empty">لا يوجد تنفيذ بعد.</div>`
+      return
+    }
+    const statusLabel: Record<EvalRowStatus, string> = {
+      applied: 'تم التطبيق',
+      partial: 'تم جزئيًا',
+      'not-found': 'غير موجود',
+      'missing-field': 'حقل مفقود',
+      invalid: 'غير صالح',
+      error: 'خطأ',
+      stopped: 'متوقف',
+      skipped: 'متخطى',
+    }
+    evalLog.innerHTML = evalLogRows.slice().reverse().map((row) => {
+      const cls = row.status === 'applied' ? 'ok'
+        : row.status === 'partial' ? 'warn'
+        : row.status === 'stopped' || row.status === 'skipped' ? 'warn'
+        : 'err'
+      const msg = row.message ? ` — ${escapeHtml(row.message)}` : ''
+      return `<div class="bulk-log-item ${cls}">
+        <span class="bulk-log-code" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
+        <span class="bulk-log-status">${statusLabel[row.status]}${msg}</span>
+        <span class="bulk-log-time">${formatTime(row.at)}</span>
+      </div>`
+    }).join('')
+  }
+
+  function appendEvalLog(row: EvalRowResult): void {
+    evalLogRows.push(row)
+    renderEvalLog()
+  }
+
+  function evalReadyToArm(): boolean {
+    if (!evalParsed) return false
+    if (evalRunning) return false
+    if (!evalExecutableRows().length) return false
+    if (evalRows.some((row) => evalNeedsDecision(row))) return false
+    return true
+  }
+
+  function formatEvalValues(values: EvalValues | null): string {
+    if (!values) return '—'
+    const parts: string[] = []
+    if (values.exam != null) parts.push(`امتحان: ${values.exam}`)
+    if (values.homework != null) parts.push(`واجب: ${values.homework}`)
+    return parts.join(' · ') || '—'
+  }
+
+  function renderEvalResolve(): void {
+    if (!evalRows.length) {
+      evalResolveBox.hidden = true
+      evalResolveBox.innerHTML = ''
+      return
+    }
+
+    const undecided = evalRows.filter((row) => evalNeedsDecision(row))
+    const dropped = evalRows.filter((row) => row.identityStatus === 'dropped')
+    const resolvedOk = evalRows.filter((row) => (row.identityStatus === 'ready' || row.identityStatus === 'resolved') && !(row.ambiguousNumbers && !row.numberMap))
+
+    const renderRow = (row: EvalWorkRow): string => {
+      const eff = evalEffectiveValues(row)
+      const identityOk = row.identityStatus === 'ready' || row.identityStatus === 'resolved'
+      const statusText = row.identityStatus === 'dropped' ? 'تم التجاهل'
+        : row.ambiguousNumbers && !row.numberMap ? 'رقمان — اختر: أيهما الامتحان وأيهما الواجب؟'
+        : identityOk
+          ? `${formatEvalLabel(row.code, row.studentName, row.identifier)} — ${formatEvalValues(eff)}`
+          : row.identityStatus === 'ambiguous' ? 'الاسم غامض — اختر الطالب الصحيح'
+          : row.identityStatus === 'not-found' ? 'لم يُعثر على الطالب في صفحة التقييم'
+          : row.identityStatus === 'too-many' ? 'نتائج كثيرة جدًا'
+          : row.identityStatus === 'error' ? 'تعذّر التحليل'
+          : row.message || 'يحتاج قرارًا'
+
+      const badgeCls = identityOk && !(row.ambiguousNumbers && !row.numberMap) ? 'on'
+        : row.identityStatus === 'dropped' ? 'off'
+        : 'busy'
+
+      let choicesHtml = ''
+      if (row.identityStatus !== 'dropped' && row.candidates.length) {
+        const list = row.candidates.slice(0, 12)
+        choicesHtml = `<div class="bulk-resolve-choices">${list.map((c) => {
+          const chosen = identityOk && row.code && c.code === row.code
+          return `<button type="button" class="bulk-choice ${chosen ? 'selected' : ''}"
+            data-eval-action="choose" data-key="${escapeHtml(row.key)}"
+            data-code="${escapeHtml(c.code)}" data-name="${escapeHtml(c.name)}">
+            <span>${escapeHtml(c.name || 'طالب')}</span>
+            <small dir="ltr">${escapeHtml(c.code || 'بدون كود')}</small>
+          </button>`
+        }).join('')}${row.candidates.length > 12 ? `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>` : ''}</div>`
+      }
+
+      let numberChoiceHtml = ''
+      if (row.ambiguousNumbers && row.numberTokens) {
+        const [a, b] = row.numberTokens
+        numberChoiceHtml = `<div class="bulk-note-inline">رقمان (${escapeHtml(a)}، ${escapeHtml(b)}) — حدّد الترتيب:</div>
+          <div class="bulk-resolve-actions">
+            <button type="button" class="bulk-mini-btn ${row.numberMap === 'exam-homework' ? 'active' : ''}" data-eval-action="map" data-key="${escapeHtml(row.key)}" data-map="exam-homework">الأول امتحان (${escapeHtml(a)}) · الثاني واجب (${escapeHtml(b)})</button>
+            <button type="button" class="bulk-mini-btn ${row.numberMap === 'homework-exam' ? 'active' : ''}" data-eval-action="map" data-key="${escapeHtml(row.key)}" data-map="homework-exam">الأول واجب (${escapeHtml(a)}) · الثاني امتحان (${escapeHtml(b)})</button>
+          </div>`
+      }
+
+      const showEdit = row.identityStatus !== 'dropped'
+      const editHtml = showEdit ? `<div class="bulk-inline-edit" ${(identityOk && !(row.ambiguousNumbers && !row.numberMap)) ? 'hidden' : ''}>
+          <input type="text" class="bulk-input" data-eval-edit="${escapeHtml(row.key)}" value="${escapeHtml(row.query)}" placeholder="عدّل المعرّف ثم أعد المطابقة" />
+          <button type="button" class="bulk-mini-btn" data-eval-action="rematch" data-key="${escapeHtml(row.key)}">إعادة مطابقة</button>
+        </div>` : ''
+
+      const actions = row.identityStatus === 'dropped'
+        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-eval-action="undrop" data-key="${escapeHtml(row.key)}">استرجاع</button></div>`
+        : `<div class="bulk-resolve-actions">
+            ${identityOk ? `<button type="button" class="bulk-mini-btn" data-eval-action="change" data-key="${escapeHtml(row.key)}">تغيير الطالب</button>` : ''}
+            <button type="button" class="bulk-mini-btn" data-eval-action="drop" data-key="${escapeHtml(row.key)}">تجاهل</button>
+          </div>`
+
+      const reason = row.message && !identityOk ? `<div class="bulk-resolve-reason">${escapeHtml(row.message)}</div>` : ''
+      const valuesNote = (identityOk && eff) ? `<div class="bulk-note-inline">القيم: ${escapeHtml(formatEvalValues(eff))}</div>` : ''
+
+      return `<div class="bulk-resolve-item ${badgeCls === 'on' ? 'ok' : row.identityStatus === 'dropped' ? 'drop' : ''}" data-eval-key="${escapeHtml(row.key)}">
+        <div class="bulk-resolve-head">
+          <span class="bulk-resolve-name">${escapeHtml(row.raw)}</span>
+          <span class="feature-badge ${badgeCls}">${escapeHtml(statusText)}</span>
+        </div>
+        ${reason}
+        ${numberChoiceHtml}
+        ${choicesHtml}
+        ${editHtml}
+        ${actions}
+        ${valuesNote}
+      </div>`
+    }
+
+    let html = ''
+    if (undecided.length) {
+      html += `<div class="bulk-undecided-section">
+        <div class="bulk-undecided-head">
+          <div class="bulk-undecided-title">
+            <strong>عناصر تحتاج قرارًا</strong>
+            <span class="feature-badge busy">${undecided.length}</span>
+          </div>
+          <div class="bulk-resolve-actions">
+            <button type="button" class="bulk-mini-btn" data-eval-action="drop-all-unresolved">تجاهل غير المحلولين</button>
+          </div>
+        </div>
+        <div class="bulk-note-inline">حلّ غموض الطالب/الأرقام أو تجاهل العنصر للمتابعة بالباقي.</div>
+        ${undecided.map(renderRow).join('')}
+      </div>`
+    }
+    if (resolvedOk.length) {
+      html += `<div class="bulk-resolve-group">${resolvedOk.map(renderRow).join('')}</div>`
+    }
+    if (dropped.length) {
+      html += `<div class="bulk-resolve-group">${dropped.map(renderRow).join('')}</div>`
+    }
+
+    evalResolveBox.hidden = false
+    evalResolveBox.innerHTML = html
+  }
+
+  function renderEvalAnalysis(): void {
+    if (!evalParsed) {
+      evalPreviewBox.textContent = 'لم تتم المعاينة بعد.'
+      evalResolveBox.hidden = true
+      evalResolveBox.innerHTML = ''
+      updateEvalBulkButtons()
+      return
+    }
+    if (!evalSupported()) {
+      evalPreviewBox.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/evaluation</code> التي تحتوي جدول الطلاب أولًا.</div>`
+      renderEvalResolve()
+      updateEvalBulkButtons()
+      return
+    }
+
+    const exec = evalExecutableRows()
+    const needs = evalRows.filter((row) => evalNeedsDecision(row)).length
+    const dropped = evalRows.filter((row) => row.identityStatus === 'dropped').length
+    const numbersAmb = evalRows.filter((row) => row.ambiguousNumbers && !row.numberMap).length
+    const parts: string[] = []
+    parts.push(`<div class="bulk-preview-grid">
+      <div><strong>أسطر صالحة</strong><span>${evalParsed.entries.length}</span></div>
+      <div><strong>جاهزة للتنفيذ</strong><span>${exec.length}</span></div>
+      <div><strong>تحتاج قرارًا</strong><span>${needs}</span></div>
+      <div><strong>أرقام غامضة</strong><span>${numbersAmb}</span></div>
+      <div><strong>متجاهَلة</strong><span>${dropped}</span></div>
+      <div><strong>غير صالحة</strong><span>${evalParsed.invalid.length}</span></div>
+      <div><strong>مكررة</strong><span>${evalParsed.duplicates.length}</span></div>
+    </div>`)
+    if (!evalParsed.entries.length) parts.push(`<div class="bulk-warn">لا توجد أسطر صالحة للتحليل.</div>`)
+    if (evalParsed.invalid.length) parts.push(`<div class="bulk-warn">أسطر غير صالحة سيتم تجاهلها: ${evalParsed.invalid.slice(0, 8).map(escapeHtml).join('، ')}${evalParsed.invalid.length > 8 ? '…' : ''}</div>`)
+    if (numbersAmb) parts.push(`<div class="bulk-warn">يوجد ${numbersAmb} سطر برقمين — اختر أيهما الامتحان وأيهما الواجب.</div>`)
+    if (needs) parts.push(`<div class="bulk-warn">يوجد ${needs} عنصر يحتاج قرارًا (مطابقة طالب/تحديد أرقام/تجاهل) قبل التسليح.</div>`)
+    if (!undoRedo.enabled) parts.push(`<div class="bulk-warn">ميزة التراجع متوقفة؛ فعّلها لتسجيل الدفعة كتراجع واحد.</div>`)
+    if (!exec.length && evalParsed.entries.length) parts.push(`<div class="bulk-warn">لا توجد عناصر جاهزة للتنفيذ.</div>`)
+    parts.push(`<div class="bulk-note-inline">مطابقة الطلاب تتم من صفوف جدول التقييم المحمّلة في الصفحة الحالية. القيم غير المذكورة تُترك على الوضع الافتراضي للصفحة. الحفظ يعتمد على سلوك الصفحة (قد يكون تلقائيًا عند التغيير).</div>`)
+    evalPreviewBox.innerHTML = parts.join('')
+    renderEvalResolve()
+    updateEvalBulkButtons()
+  }
+
+  function updateEvalBulkButtons(): void {
+    if (!evalBadge) return
+    const supported = evalSupported()
+    evalPreviewBtn.disabled = !supported || evalRunning
+    evalArmBtn.disabled = !supported || evalRunning || !evalReadyToArm()
+    evalRunBtn.disabled = !supported || evalRunning || !evalArmed || !evalReadyToArm() || !undoRedo.enabled
+    evalStopBtn.disabled = !evalRunning
+
+    if (!supported) setEvalBadge('خارج صفحة التقييم', 'off')
+    else if (evalRunning) setEvalBadge('جارٍ التنفيذ', 'busy')
+    else if (evalArmed) setEvalBadge('مسلّح', 'on')
+    else if (evalRows.some((row) => evalNeedsDecision(row))) setEvalBadge('يتطلب قرارًا', 'busy')
+    else setEvalBadge('جاهز', 'off')
+  }
+
+  function analyzeEvaluationBulk(): void {
+    evalAnalysisToken++
+    evalParsed = parseEvaluationEntries(evalInput.value)
+    evalRows = evalParsed.entries.map((entry) => {
+      const m = matchIdentifier(entry.identifier)
+      return {
+        key: entry.key,
+        raw: entry.raw,
+        identifier: entry.identifier,
+        query: entry.identifier,
+        values: entry.values,
+        ambiguousNumbers: entry.ambiguousNumbers,
+        numberTokens: entry.numberTokens,
+        numberMap: undefined,
+        identityStatus: m.status,
+        code: m.code,
+        studentName: m.studentName,
+        candidates: m.candidates,
+        message: m.message,
+      }
+    })
+    evalArmed = false
+    evalLogRows = []
+    renderEvalLog()
+    renderEvalAnalysis()
+  }
+
+  function invalidateEvalBulk(): void {
+    if (evalRunning) return
+    evalAnalysisToken++
+    evalParsed = null
+    evalRows = []
+    evalArmed = false
+    evalPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة والتحليل قبل التنفيذ.'
+    evalResolveBox.hidden = true
+    evalResolveBox.innerHTML = ''
+    updateEvalBulkButtons()
+  }
+
+  function rematchEvalRow(key: string, nextQuery: string): void {
+    const index = evalRows.findIndex((row) => row.key === key)
+    if (index < 0) return
+    const row = evalRows[index]
+    const query = nextQuery.trim() || row.query
+    const m = matchIdentifier(query)
+    evalRows[index] = {
+      ...row,
+      query,
+      identityStatus: m.status,
+      code: m.code,
+      studentName: m.studentName,
+      candidates: m.candidates,
+      message: m.message,
+    }
+    evalArmed = false
+    renderEvalAnalysis()
+  }
+
+  async function executeEvaluationBulk(): Promise<void> {
+    if (evalRunning || !evalArmed || !evalParsed) return
+    if (!evalSupported()) {
+      toast({ title: 'خارج صفحة التقييم', description: 'افتح صفحة التقييم أولًا.', variant: 'warning' })
+      return
+    }
+    if (evalRows.some((row) => evalNeedsDecision(row))) {
+      toast({ title: 'يوجد عناصر تحتاج قرارًا', description: 'حلّ الغموض أو تجاهل العناصر قبل التنفيذ.', variant: 'warning' })
+      return
+    }
+    const entries = evalExecutableRows()
+    if (!entries.length) return
+    if (!undoRedo.enabled) {
+      toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء مع تعطيل التراجع.', variant: 'warning' })
+      return
+    }
+
+    evalRunning = true
+    evalStop = { stop: false }
+    evalLogRows = []
+    renderEvalLog()
+    evalArmed = false
+    updateEvalBulkButtons()
+
+    undoRedo.beginBatch('تقييم جماعي')
+    let applied = 0
+    let partial = 0
+    let failed = 0
+    let skipped = 0
+    let stopped = false
+
+    try {
+      for (const item of entries) {
+        if (evalStop.stop) {
+          stopped = true
+          appendEvalLog({ key: item.key, label: formatEvalLabel(item.code, item.studentName, item.identifier), status: 'stopped', message: 'تم الإيقاف', at: Date.now() })
+          break
+        }
+        const values = evalEffectiveValues(item)
+        const label = formatEvalLabel(item.code, item.studentName, item.identifier)
+        if (!item.code || !values) {
+          skipped++
+          appendEvalLog({ key: item.key, label, status: 'skipped', message: 'بيانات غير مكتملة', at: Date.now() })
+          continue
+        }
+        const row = findRowForCode(item.code)
+        if (!row) {
+          failed++
+          appendEvalLog({ key: item.key, label, status: 'not-found', message: 'الصف غير موجود في الجدول الحالي', at: Date.now() })
+          continue
+        }
+        try {
+          const res = await applyEvaluationToRow(row, values)
+          const at = Date.now()
+          if (res.status === 'applied') applied++
+          else if (res.status === 'partial') partial++
+          else if (res.status === 'skipped') skipped++
+          else failed++
+          appendEvalLog({ key: item.key, label, status: res.status, message: res.message, at })
+          // allow page to react/save between rows (best-effort)
+          await new Promise((r) => window.setTimeout(r, 120))
+        } catch (err) {
+          failed++
+          appendEvalLog({ key: item.key, label, status: 'error', message: err instanceof Error ? err.message : String(err), at: Date.now() })
+        }
+      }
+
+      const detail = `تم ${applied} · جزئي ${partial} · فشل ${failed} · متخطى ${skipped}${stopped ? ' · متوقف' : ''}`
+      const committed = undoRedo.commitBatch({
+        title: `تقييم جماعي (${applied + partial})`,
+        detail,
+      })
+
+      if ((applied + partial) > 0 && !committed) {
+        toast({
+          title: 'اكتمل التنفيذ بدون سجل تراجع',
+          description: 'لم تُرصد إجراءات قابلة للإلغاء. قد يكون الحفظ يتطلب إجراءً يدويًا في الصفحة (تحقق حيًا).',
+          variant: 'warning',
+          duration: 8000,
+        })
+      } else if (applied + partial > 0) {
+        toast({
+          title: 'اكتمل التقييم الجماعي',
+          description: `${detail}. يمكن التراجع عن الدفعة بـ Ctrl+Z.`,
+          variant: 'applied',
+          duration: 7000,
+        })
+      } else {
+        toast({ title: 'لا توجد تغييرات مطبقة', description: detail, variant: 'info' })
+      }
+    } catch (error) {
+      undoRedo.commitBatch({ title: `تقييم جماعي (${undoRedo.batchCount})`, detail: 'انتهى التنفيذ بخطأ' })
+      toast({ title: 'حدث خطأ أثناء التنفيذ', description: error instanceof Error ? error.message : String(error), variant: 'error' })
+    } finally {
+      evalRunning = false
+      evalStop.stop = false
+      renderEvalAnalysis()
+    }
+  }
+
+  evalPreviewBtn.addEventListener('click', analyzeEvaluationBulk)
+  evalArmBtn.addEventListener('click', () => {
+    if (!evalReadyToArm()) { analyzeEvaluationBulk(); return }
+    evalArmed = true
+    setEvalBadge('مسلّح', 'on')
+    updateEvalBulkButtons()
+    toast({ title: 'التنفيذ مسلّح', description: 'اضغط تنفيذ للبدء. أي تعديل سيلغي التسليح.', variant: 'warning' })
+  })
+  evalRunBtn.addEventListener('click', () => { void executeEvaluationBulk() })
+  evalStopBtn.addEventListener('click', () => {
+    if (!evalRunning) return
+    evalStop.stop = true
+    setEvalBadge('جارٍ الإيقاف', 'busy')
+    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف التنفيذ بعد الطالب الحالي.', variant: 'warning' })
+  })
+  evalInput.addEventListener('input', invalidateEvalBulk)
+
+  evalResolveBox.addEventListener('click', (event) => {
+    const btn = (event.target as Element).closest<HTMLButtonElement>('[data-eval-action]')
+    if (!btn) return
+    const action = btn.dataset.evalAction
+    const key = btn.dataset.key || ''
+
+    if (action === 'drop-all-unresolved') {
+      let changed = false
+      evalRows = evalRows.map((row) => {
+        if (!evalNeedsDecision(row) || row.identityStatus === 'dropped') return row
+        changed = true
+        return { ...row, identityStatus: 'dropped' as const, message: 'تم التجاهل' }
+      })
+      if (changed) { evalArmed = false; renderEvalAnalysis() }
+      return
+    }
+
+    const index = evalRows.findIndex((row) => row.key === key)
+    if (index < 0) return
+
+    if (action === 'choose') {
+      const code = (btn.dataset.code || '').toUpperCase()
+      const name = btn.dataset.name || ''
+      if (!code) {
+        toast({ title: 'لا يوجد كود', description: 'لا يمكن اختيار طالب بدون كود صالح.', variant: 'warning' })
+        return
+      }
+      evalRows[index] = { ...evalRows[index], identityStatus: 'resolved', code, studentName: name, message: `تم الاختيار: ${name}` }
+      evalArmed = false
+      renderEvalAnalysis()
+      return
+    }
+    if (action === 'map') {
+      const map = btn.dataset.map as EvalNumberMap | undefined
+      if (map === 'exam-homework' || map === 'homework-exam') {
+        evalRows[index] = { ...evalRows[index], numberMap: map }
+        evalArmed = false
+        renderEvalAnalysis()
+      }
+      return
+    }
+    if (action === 'drop') {
+      evalRows[index] = { ...evalRows[index], identityStatus: 'dropped', message: 'تم التجاهل' }
+      evalArmed = false
+      renderEvalAnalysis()
+      return
+    }
+    if (action === 'undrop' || action === 'change') {
+      const row = evalRows[index]
+      const m = matchIdentifier(row.query || row.identifier)
+      evalRows[index] = { ...row, identityStatus: m.status, code: m.code, studentName: m.studentName, candidates: m.candidates, message: m.message }
+      evalArmed = false
+      renderEvalAnalysis()
+      return
+    }
+    if (action === 'rematch') {
+      const edit = evalResolveBox.querySelector<HTMLInputElement>(`[data-eval-edit="${CSS.escape(key)}"]`)
+      const nextQuery = edit?.value.trim() || evalRows[index].query
+      rematchEvalRow(key, nextQuery)
+    }
+  })
+
+  updateEvalBulkButtons()
 
   const bulkMenu = backdrop.querySelector<HTMLElement>('[data-bulk-view="menu"]')!
   const bulkDetails = Array.from(backdrop.querySelectorAll<HTMLElement>('.bulk-detail[data-bulk-view]'))
-  function showBulkView(view: 'menu' | 'attendance' | 'evaluation'): void {
+  function showBulkView(view: 'menu' | 'attendance' | 'evaluation' | 'export'): void {
     bulkMenu.hidden = view !== 'menu'
     for (const detail of bulkDetails) {
       detail.hidden = detail.dataset.bulkView !== view
@@ -1919,12 +2694,16 @@ export function mountShell(): void {
     if (view === 'attendance') {
       refreshBulkLesson()
       updateBulkButtons()
+    } else if (view === 'export') {
+      refreshAttendanceExport()
+    } else if (view === 'evaluation') {
+      updateEvalBulkButtons()
     }
   }
   for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-open]'))) {
     btn.addEventListener('click', () => {
       const view = btn.dataset.bulkOpen
-      if (view === 'attendance' || view === 'evaluation') showBulkView(view)
+      if (view === 'attendance' || view === 'evaluation' || view === 'export') showBulkView(view)
     })
   }
   for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-back]'))) {
@@ -1936,6 +2715,17 @@ export function mountShell(): void {
       title: 'تم التطبيق',
       description: 'معاينة لإشعار تمبرينا باستخدام ملصق applied',
       variant: 'applied',
+    })
+  })
+  GM_registerMenuCommand('Tamperina — تشخيص أزرار الواجب', () => {
+    const report = diagnoseHomeworkButtons()
+    console.info('[Tamperina homework diagnostic]\n' + report)
+    void navigator.clipboard?.writeText(report).catch(() => {})
+    toast({
+      title: 'تشخيص أزرار الواجب',
+      description: 'تم نسخ التقرير — الصقه هنا، وراجع console (F12) إن لزم.',
+      variant: 'info',
+      duration: 7000,
     })
   })
   GM_registerMenuCommand('Tamperina — تراجع (Ctrl+Z)', () => void undoRedo.undo())

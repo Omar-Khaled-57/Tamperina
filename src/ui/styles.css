@@ -1034,6 +1034,16 @@
   gap: 8px;
 }
 
+/* The export panel keeps its three actions on a single row. */
+.bulk-actions.export-actions {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.bulk-actions.export-actions .action-btn {
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .bulk-preview {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1207,15 +1217,51 @@
   cursor: pointer;
 }
 
-.bulk-choice:hover,
-.bulk-choice.selected {
+.bulk-choice:hover {
   border-color: rgba(242, 206, 170, 0.35);
   background: rgba(242, 206, 170, 0.1);
+}
+
+/* The one candidate that will actually be recorded — make it unmistakable. */
+.bulk-choice.selected {
+  border-color: var(--accent);
+  background: rgba(242, 206, 170, 0.16);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 14px var(--accent-glow);
+}
+
+.bulk-choice-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bulk-choice-mark {
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.bulk-resolve-chosen-note {
+  padding-top: 2px;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--accent);
+}
+
+.bulk-resolve-chosen-note.muted {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.bulk-resolve-choices.other-group .bulk-choice:not(:hover) {
+  opacity: 0.5;
 }
 
 .bulk-choice small {
   color: var(--text-muted);
   direction: ltr;
+  flex-shrink: 0;
 }
 
 .bulk-resolve-actions {
@@ -1236,8 +1282,16 @@
   cursor: pointer;
 }
 
-.bulk-mini-btn:hover {
-  border-color: rgba(242, 206, 170, 0.3);
+.bulk-mini-btn:hover,
+.bulk-mini-btn.active {
+  border-color: rgba(242, 206, 170, 0.35);
+  color: var(--text);
+  background: rgba(242, 206, 170, 0.08);
+}
+
+.bulk-mini-btn.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(242, 206, 170, 0.25);
 }
 
 .bulk-inline-edit {
@@ -1513,6 +1567,28 @@
 .bulk-resolve-group {
   display: grid;
   gap: 10px;
+}
+
+/* ---- bulk attendance export ------------------------------------------------ */
+.bulk-export-summary {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.bulk-export-text {
+  direction: ltr;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 /* --- evaluation find bar (Ctrl+Alt+F) --------------------------------------- */

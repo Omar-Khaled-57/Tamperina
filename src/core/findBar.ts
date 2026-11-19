@@ -136,6 +136,23 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
     }
   }
 
+  function exactMatch(): { row: HTMLElement, digits: string } | null {
+    const digits = normalizeDigits(input.value.trim())
+    if (!/^\d{4}$/.test(digits)) return null
+    const row = evaluationRows().find((candidate) => rowCode(candidate) === digits)
+    return row ? { row, digits } : null
+  }
+
+  /** Leave the find bar so the next keystrokes grade the selected student. */
+  function handOffToStudent(match: { row: HTMLElement, digits: string }): void {
+    lastExactSelection = match.digits
+    selectRow(match.row)
+    setOpen(false)
+    // setOpen blurs the input; make sure focus lands on the page rather than
+    // any leftover control so the student hotkeys see a non-editable target.
+    document.body.focus?.()
+  }
+
   function search(): void {
     const query = input.value.trim()
     maybeAutoSelect(query)
@@ -200,7 +217,11 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
   input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault()
-      move(event.shiftKey ? -1 : 1)
+      // 1214 + Enter + 10 grades that student instead of extending the query.
+      // Shift+Enter keeps the old "move between matches" behaviour.
+      const match = exactMatch()
+      if (!event.shiftKey && match) handOffToStudent(match)
+      else move(event.shiftKey ? -1 : 1)
     } else if (event.key === 'Escape') {
       event.preventDefault()
       event.stopPropagation()

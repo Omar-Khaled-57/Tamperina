@@ -23,6 +23,9 @@ import chevronDown from 'lucide-static/icons/chevron-down.svg?raw'
 import userCheck from 'lucide-static/icons/user-check.svg?raw'
 import graduationCap from 'lucide-static/icons/graduation-cap.svg?raw'
 import keyboard from 'lucide-static/icons/keyboard.svg?raw'
+import copy from 'lucide-static/icons/copy.svg?raw'
+import download from 'lucide-static/icons/download.svg?raw'
+import refreshCw from 'lucide-static/icons/refresh-cw.svg?raw'
 
 export const icons = {
   flip: flipHorizontal,
@@ -51,4 +54,7 @@ export const icons = {
   userCheck,
   graduationCap,
   keyboard,
+  copy,
+  download,
+  refresh: refreshCw,
 } as const

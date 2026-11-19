@@ -8,7 +8,7 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 **M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused.
 
-**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, evaluation placeholder, and a coming-soon slot). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. The full plan lives in `dev/PLAN.md` (gitignored).
+**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, export, evaluation placeholder). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. **تصدير أكواد الحضور** lists the attended students cached for the current lesson as `student code, name` (one per line), with copy and UTF-8 `.txt` download buttons. The full plan lives in `dev/PLAN.md` (gitignored).
 
 **M3 — Evaluation tools.** Three new independent switches in **المفاتيح**, active on `/evaluation`: select a student and grade them with hotkeys, a Firefox-style find bar on `Ctrl+Alt+F` (4-digit ID auto-selects a student), and glowy homework-grade buttons. All of them set the page's own controls and dispatch `change`, so the platform's auto-save and Tamperina's undo/redo keep working.
 
@@ -80,7 +80,7 @@ The three new switches are independent and default to on. They are disabled (but
 
 Digits and `.` type into the selected student's **exam score** (`7.5` works, Arabic-Indic digits are normalized). The first digit starts a new value; Backspace deletes; Enter or a short pause commits. Hotkeys are ignored while typing in a field or in the find bar.
 
-**شريط البحث في التقييم** — `Ctrl+Alt+F` opens a Firefox-style bar at the bottom. It searches all student rows, highlights matches, and `Enter` / `Shift+Enter` move between them; `Esc` closes it. A query of exactly four digits (Latin or Arabic) selects the matching student automatically, even if the selection toggle is off.
+**شريط البحث في التقييم** — `Ctrl+Alt+F` opens a Firefox-style bar at the bottom. It searches all student rows, highlights matches, and `Enter` / `Shift+Enter` move between them; `Esc` closes it. A query of exactly four digits (Latin or Arabic) selects the matching student automatically, even if the selection toggle is off. Press `Enter` to hand off to that student: the find bar closes and the next keys grade them (e.g. `1214`, `Enter`, `10` sets exam score 10). `Shift+Enter` still moves between matches.
 
 **أزرار تقييم الواجب** — replaces the detected homework dropdown with colored glowing buttons. Clicking one selects that student and updates the grade through the page's own select, so its auto-save and undo/redo still apply. With this switch on, the letter hotkeys above also set the homework grade when a student is selected.
 
@@ -95,8 +95,8 @@ On `/attendance/scan` (including `?lesson_id=...` links):
 1. Paste one student per line — a **code** or a **name**. Tamperina normalizes Arabic/Persian digits, removes duplicates, and ignores invalid tokens.
 2. Confirm the lesson id (prefilled from the open page). If you change it to a different lesson, open that lesson's scan page first.
 3. Click **معاينة وتحليل**. Codes are accepted directly; names are searched in the lesson's students.
-4. Resolve any names that are **not found**, **ambiguous**, or have **too many matches**: choose the correct student, edit the name and re-search, **تجاهل (يدويًا)** to skip, or **تسجيل طلاب جدد بدون كارت** to register them through the page's walk-in form.
-5. When everything is resolved, dropped, or registered as new students, click **تسليح التنفيذ**, then **تنفيذ**.
+4. Resolve any names that are **not found**, **ambiguous**, or have **too many matches**: choose the correct student, edit the name and re-search, **تجاهل (يدويًا)** to skip, or **تسجيل طلاب جدد بدون كارت** to register them through the page's walk-in form. Names can still be auto-selected when one candidate matches the name/code exactly. In that case the chosen student is highlighted with **✓ المُختار — سيُسجَّل في الحضور**, while the other search results are grouped separately under "نتائج أخرى — غير مختارة" and dimmed, so it is always clear who will actually be recorded.
+5. When everything is resolved, dropped, or registered as new students, click **تسليح التنفيذ**, then **تنفيذ**. Ignored names stay in the top **طلاب غير محلولين / مُتجاهَلين** section (they are only excluded from the batch), so after **تجاهل الكل** you can still use **نسخ** to copy the full list for manual handling.
 
 #### Registering unresolved names as new students
 

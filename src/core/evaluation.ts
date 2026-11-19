@@ -258,16 +258,28 @@ export function homeworkSelect(row: HTMLElement): HTMLSelectElement | null {
   const selects = rowSelects(row)
   const main = mainGradeSelect(row)
 
-  // A homework label/name is the strongest signal (e.g. "تقدير الواجب").
+  // A homework label/name is the strongest signal (e.g. "تقييم الواجب").
+  // Do NOT require grade-looking options here: homework selects usually use
+  // their own wording ("واجب كامل", "ناقص", ...) that won't match the main
+  // grade scale, which used to make detection fail and leave the dropdown.
   const byLabel = selects.find((select) => select !== main && hasHomeworkLabel(select))
-  if (byLabel && hasGradeOption(byLabel)) return byLabel
+  if (byLabel) return byLabel
 
-  // An option named exactly "واجب" / "الواجب" is specific; "الواجب ناقص" is a grade, not a label.
+  // An option named exactly "واجب" / "الواجب" is specific; "الواجب ناقص" is a
+  // grade on the main select, not a homework label.
   const byOption = selects.find((select) => select !== main && hasHomeworkOnlyOption(select))
-  if (byOption && hasGradeOption(byOption)) return byOption
+  if (byOption) return byOption
 
-  // Fallback: the only other select that also carries the grade scale.
-  const others = selects.filter((select) => select !== main && hasGradeOption(select))
+  // Some tables label the dropdown with plain cell text instead of a <label>.
+  const byCell = selects.find((select) => {
+    if (select === main) return false
+    const cell = select.closest<HTMLElement>('td, th, label')
+    return !!cell && /واجب|homework/i.test(cell.textContent ?? '')
+  })
+  if (byCell) return byCell
+
+  // Fallback: when there is exactly one other select, it must be the homework one.
+  const others = selects.filter((select) => select !== main)
   return others.length === 1 ? others[0] : null
 }
 
@@ -280,7 +292,7 @@ export function findOptionByLabel(select: HTMLSelectElement, label: string): HTM
     ?? null
 }
 
-function setSelectValue(select: HTMLSelectElement, value: string): void {
+export function setSelectValue(select: HTMLSelectElement, value: string): void {
   if (select.value === value) return
   // Remember the saved value before our write so Ctrl+Z can restore it.
   const row = select.closest<HTMLElement>(ROW_SELECTOR)
@@ -290,7 +302,19 @@ function setSelectValue(select: HTMLSelectElement, value: string): void {
   select.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
-function gradeFromOptionText(text: string): GradeKey | '' {
+export function setExamScore(row: HTMLElement, value: string): void {
+  const input = examScoreInput(row)
+  if (!input) return
+  // Cancel any in-progress interactive typing so it can't overwrite this value.
+  typing = null
+  window.clearTimeout(commitTimer)
+  getUndoRedoController().captureGradeBaseline(row)
+  input.value = value
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
+export function gradeFromOptionText(text: string): GradeKey | '' {
   const normalized = normalizeLabel(text)
   for (const definition of GRADE_DEFINITIONS) {
     const key = normalizeLabel(definition.key)
@@ -433,6 +457,30 @@ export function applyHomeworkButtons(): void {
       uninstallHomeworkButtons(row, select)
     }
   }
+}
+
+/** Copyable report for diagnosing why homework buttons may not appear. */
+export function diagnoseHomeworkButtons(): string {
+  const rows = evaluationRows()
+  const lines: string[] = [
+    `page=${location.pathname}`,
+    `enabled=${isFeatureEnabled('homework-buttons')}`,
+    `rows=${rows.length}`,
+  ]
+  for (const [index, row] of rows.slice(0, 3).entries()) {
+    const selects = rowSelects(row)
+    const homework = homeworkSelect(row)
+    lines.push(`row${index}: selects=${selects.length} main=${mainGradeSelect(row)?.name || '-'} homework=${homework?.name || '-'}`)
+    for (const select of selects) {
+      const options = Array.from(select.options).slice(0, 10)
+        .map((option) => (option.textContent ?? '').trim()).join(' | ')
+      lines.push(`  select name=${select.name || '-'} id=${select.id || '-'}`
+        + ` label="${selectLabels(select).trim()}"`
+        + ` hidden=${select.classList.contains(HIDDEN_SELECT_CLASS)}`
+        + ` options=[${options}]`)
+    }
+  }
+  return lines.join('\n')
 }
 
 // ---- boot ---------------------------------------------------------------------
