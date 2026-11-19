@@ -41,9 +41,13 @@ function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat('ar', { hour: '2-digit', minute: '2-digit' }).format(timestamp)
 }
 
+function isAttendancePage(): boolean {
+  return location.pathname.replace(/\/$/, '') === '/attendance/scan'
+}
+
 function featureScopeLabel(): string {
   return location.pathname.replace(/\/$/, '') === '/evaluation'
-    ? 'التقييم — قيد التقاط العملية'
+    ? 'تقييم الحصة'
     : 'حضور الطلاب'
 }
 
@@ -248,7 +252,7 @@ export function mountShell(): void {
         ${historyHtml}
 
         <p class="feature-note">${icons.shieldAlert}
-          السجل مؤقت لهذه الصفحة فقط، ولا يُحفظ بعد تحديثها. مفتاح التشغيل هو السماح بتنفيذ التراجع.
+          السجل مؤقت لهذه الصفحة فقط، ولا يُحفظ بعد تحديثها. مفتاح التشغيل هو السماح بتنفيذ التراجع. في صفحة الحضور تعمل الاختصارات حتى أثناء كتابة حقل البحث.
         </p>
       </section>
     `
@@ -459,7 +463,7 @@ export function mountShell(): void {
       if ((undoShortcut || redoShortcut)
         && undoRedo.supported
         && undoRedo.enabled
-        && !isEditableTarget(event.target)) {
+        && (isAttendancePage() || !isEditableTarget(event.target))) {
         event.preventDefault()
         if (redoShortcut) void undoRedo.redo()
         else void undoRedo.undo()

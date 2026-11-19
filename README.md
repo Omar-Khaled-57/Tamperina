@@ -6,7 +6,7 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 ## Status
 
-**M1 — Undo/Redo.** The mascot shell is ready, and the first real toggle is live: on `/attendance/scan`, Tamperina records successful attendance adds/removes and can reverse them with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). Grading on `/evaluation` is recognised but still waits for a captured request flow before any reversible command is registered. The full plan lives in `dev/PLAN.md` (gitignored).
+**M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused. The full plan lives in `dev/PLAN.md` (gitignored).
 
 ## Build
 
@@ -51,8 +51,9 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 | Drag the mascot | Move it anywhere (position saved as % of viewport) |
 | Click the mascot | Open the options modal (Toggles / Bulk tabs) |
 | `Alt+Shift+T` | Open the modal, or restore the mascot after click-through |
-| `Ctrl+Z` / `⌘+Z` | Undo the last recorded attendance action (outside text fields) |
+| `Ctrl+Z` / `⌘+Z` | Undo the last recorded attendance or grading action |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo the last undone action |
+| Focused input on `/attendance/scan` | Undo/redo shortcuts still run Tamperina instead of the browser's text undo |
 | `Esc` / backdrop click | Close the modal |
 
 Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History lives only in the current page session and is intentionally cleared on reload.

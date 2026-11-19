@@ -4,12 +4,12 @@ import { toast } from './toast'
 /**
  * Undo/Redo for actions we can reverse with a real API call.
  *
- * M1 scope: attendance on /attendance/scan.
- * Grading on /evaluation is recognised as a supported page, but no reversible
- * command is registered until its exact request/response flow is captured.
+ * M1 scope: attendance on /attendance/scan and grading on /evaluation.
+ * Grading writes are inferred from their request body and replayed with the
+ * previously saved values, so no server-specific endpoint needs to be hardcoded.
  */
 
-type HttpMethod = 'POST' | 'DELETE'
+type HttpMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 interface HttpCommand {
   method: HttpMethod
@@ -31,6 +31,22 @@ interface BeforeSnapshot {
   recordIds: Set<string>
   record?: LiveRecord | null
   headers?: Record<string, string>
+}
+
+interface GradeField {
+  name: string
+  type: string
+  value: string
+  checked?: boolean
+}
+
+interface GradeSnapshot {
+  key: string
+  code: string
+  label: string
+  fields: GradeField[]
+  score?: string
+  grade?: string
 }
 
 export interface HistoryAction {
@@ -116,6 +132,19 @@ function parseBody(body: unknown): unknown {
   return undefined
 }
 
+function encodeBody(body: Record<string, unknown>, headers?: Record<string, string>): string {
+  const contentType = String(headers?.['content-type'] ?? '').toLowerCase()
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(body)) {
+      if (value == null) continue
+      params.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value))
+    }
+    return params.toString()
+  }
+  return JSON.stringify(body)
+}
+
 /** Keep only CSRF/axios markers so synthetic writes are accepted, never credentials. */
 function replayHeaders(value: unknown): Record<string, string> {
   if (!value) return {}
@@ -135,7 +164,7 @@ function replayHeaders(value: unknown): Record<string, string> {
   }
 
   // Only replay CSRF/axios markers. Never copy cookies or bearer tokens into history.
-  const allowed = new Set(['x-csrf-token', 'x-xsrf-token', 'x-requested-with'])
+  const allowed = new Set(['x-csrf-token', 'x-xsrf-token', 'x-requested-with', 'content-type'])
   const result: Record<string, string> = {}
   for (const [key, item] of entries) {
     const lower = key.toLowerCase()
@@ -246,6 +275,121 @@ function snapshotFromDom(id: string): LiveRecord | null {
   }
 }
 
+function gradeCodeFromRow(row: HTMLElement): string {
+  const info = row.querySelector('.evaluation-student__info small')?.textContent?.trim() ?? ''
+  return info.split('·')[0]?.trim()
+    || row.getAttribute('data-student-code')
+    || row.getAttribute('data-student-id')
+    || row.querySelector('.student-code')?.textContent?.trim()
+    || ''
+}
+
+function gradeRowKey(row: HTMLElement): string | null {
+  const code = gradeCodeFromRow(row)
+  return code ? `${normalisePath(location.pathname)}|${code}` : null
+}
+
+function gradeRowLabel(row: HTMLElement): string {
+  const name = row.querySelector('.evaluation-student__info strong')?.textContent?.trim() || ''
+  const code = gradeCodeFromRow(row)
+  return name && code ? `${name} (${code})` : name || code || 'الطالب'
+}
+
+function gradeRowFromTarget(target: EventTarget | null): HTMLElement | null {
+  const element = target as Element | null
+  return (element?.closest?.('.evaluation-table tbody tr') as HTMLElement | null) ?? null
+}
+
+function snapshotGradeRow(row: HTMLElement): GradeSnapshot | null {
+  const key = gradeRowKey(row)
+  if (!key) return null
+
+  const form = row.querySelector<HTMLFormElement>('form')
+  const fields: GradeField[] = []
+  for (const element of Array.from(form?.elements ?? [])) {
+    const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    const name = control.name
+    if (!name || /(?:^|_)(?:token|csrf|_token)|csrf/i.test(name)) continue
+    const type = control.tagName === 'INPUT' ? (control as HTMLInputElement).type : control.tagName.toLowerCase()
+    if (type === 'button' || type === 'submit' || type === 'reset') continue
+    const checked = type === 'checkbox' || type === 'radio'
+      ? (control as HTMLInputElement).checked
+      : undefined
+    fields.push({
+      name,
+      type,
+      value: control.value ?? '',
+      ...(checked === undefined ? {} : { checked }),
+    })
+  }
+
+  const score = form?.querySelector<HTMLInputElement>('[name="exam_score"], [name="score"]')?.value
+  const grade = form?.querySelector<HTMLSelectElement>('[name="grade"], [name="evaluation"], [name="estimation"]')?.value
+
+  return {
+    key,
+    code: gradeCodeFromRow(row),
+    label: gradeRowLabel(row),
+    fields,
+    ...(score == null ? {} : { score }),
+    ...(grade == null ? {} : { grade }),
+  }
+}
+
+function sameGradeSnapshot(a: GradeSnapshot, b: GradeSnapshot): boolean {
+  if (a.key !== b.key) return false
+  const left = new Map(a.fields.map((field) => [field.name, field]))
+  const right = new Map(b.fields.map((field) => [field.name, field]))
+  if (left.size !== right.size) return false
+  for (const [name, field] of left) {
+    const other = right.get(name)
+    if (!other || field.value !== other.value || field.checked !== other.checked) return false
+  }
+  return true
+}
+
+function patchGradeBody(body: Record<string, unknown>, snapshot: GradeSnapshot): Record<string, unknown> {
+  const result = { ...body }
+  const byName = new Map(snapshot.fields.map((field) => [field.name, field]))
+
+  for (const [name, field] of byName) {
+    if (!(name in result)) continue
+    if (field.type === 'checkbox') result[name] = Boolean(field.checked)
+    else if (field.type === 'radio') {
+      if (field.checked) result[name] = field.value
+    } else {
+      result[name] = field.value
+    }
+  }
+
+  const score = snapshot.score ?? byName.get('exam_score')?.value ?? byName.get('score')?.value
+  if (score != null) {
+    for (const key of ['exam_score', 'score']) if (key in result) result[key] = score
+  }
+  const grade = snapshot.grade ?? byName.get('grade')?.value ?? byName.get('evaluation')?.value ?? byName.get('estimation')?.value
+  if (grade != null) {
+    for (const key of ['grade', 'evaluation', 'estimation']) if (key in result) result[key] = grade
+  }
+  return result
+}
+
+const GRADE_BODY_KEYS = new Set([
+  'exam_score', 'score', 'grade', 'evaluation', 'estimation', 'degree', 'mark', 'result',
+])
+
+function isGradeRequest(url: URL, body: Record<string, unknown>): boolean {
+  const keys = Object.keys(body).map((key) => key.toLowerCase())
+  if (keys.some((key) => GRADE_BODY_KEYS.has(key))) return true
+  return /(?:evaluation|grade|exam)/i.test(url.pathname) && keys.length > 0
+}
+
+function isGradeSuccess(value: unknown): boolean {
+  if (!value) return true
+  const obj = asObject(value)
+  if (!obj) return true
+  return obj.success !== false && obj.ok !== false && obj.deleted !== false
+}
+
 function describeRequest(input: Parameters<typeof fetch>[0], init?: RequestInit): { url: URL, method: string } {
   const requestLike = input as { url?: unknown, method?: unknown }
   const rawUrl = typeof input === 'string'
@@ -271,7 +415,9 @@ function createController(): UndoRedoController {
   const future: HistoryAction[] = []
   const listeners = new Set<() => void>()
   const records = new Map<string, LiveRecord>()
+  const gradeBaselines = new Map<string, GradeSnapshot>()
 
+  let lastTouchedGradeRow: HTMLElement | null = null
   let enabled = loadEnabled()
   let busy = false
   let sequence = 0
@@ -293,6 +439,8 @@ function createController(): UndoRedoController {
     past.length = 0
     future.length = 0
     records.clear()
+    gradeBaselines.clear()
+    lastTouchedGradeRow = null
     notify()
   }
 
@@ -342,10 +490,10 @@ function createController(): UndoRedoController {
       credentials: 'same-origin',
       headers: {
         Accept: 'application/json',
-        ...command.headers,
         ...(command.body ? { 'Content-Type': 'application/json' } : {}),
+        ...command.headers,
       },
-      body: command.body ? JSON.stringify(command.body) : undefined,
+      body: command.body ? encodeBody(command.body, command.headers) : undefined,
     })
 
     if (!response.ok) throw new Error(`فشل الطلب (${response.status})`)
@@ -412,6 +560,123 @@ function createController(): UndoRedoController {
         forgetRecord(record.id)
         return makeRemovedAction(record, headers)
       },
+    }
+  }
+
+  function syncGradeBaseline(): void {
+    if (normalisePath(location.pathname) !== '/evaluation') return
+    for (const row of Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))) {
+      const snapshot = snapshotGradeRow(row)
+      if (snapshot && !gradeBaselines.has(snapshot.key)) gradeBaselines.set(snapshot.key, snapshot)
+    }
+  }
+
+  function findGradeRowByKey(key: string): HTMLElement | null {
+    return Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
+      .find((row) => gradeRowKey(row) === key) ?? null
+  }
+
+  function findGradeRowFromBody(body: Record<string, unknown>): HTMLElement | null {
+    const candidates = ['student_user_id', 'student_id', 'student', 'user_id', 'code', 'student_code']
+      .map((key) => body[key])
+      .filter((value) => value != null && value !== '')
+      .map((value) => String(value))
+    if (!candidates.length) return lastTouchedGradeRow
+
+    return Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
+      .find((row) => {
+        const key = gradeRowKey(row) ?? ''
+        return candidates.some((value) => key.endsWith(`|${value}`))
+      }) ?? lastTouchedGradeRow
+  }
+
+  function applySnapshotToRow(snapshot: GradeSnapshot): void {
+    const row = findGradeRowByKey(snapshot.key)
+    if (!row) return
+    const controls = Array.from(row.querySelector('form')?.elements ?? []) as Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
+    for (const field of snapshot.fields) {
+      const control = controls.find((item) => item.name === field.name)
+      if (!control) continue
+      if (field.type === 'checkbox' || field.type === 'radio') {
+        (control as HTMLInputElement).checked = Boolean(field.checked)
+      } else {
+        control.value = field.value
+      }
+    }
+  }
+
+  function makeGradeAction(command: HttpCommand, before: GradeSnapshot, after: GradeSnapshot): HistoryAction {
+    const gradePart = before.grade && after.grade && before.grade !== after.grade
+      ? ` · ${before.grade} ← ${after.grade}`
+      : ''
+
+    const replay = async (target: GradeSnapshot): Promise<void> => {
+      const body = command.body ? patchGradeBody(command.body, target) : undefined
+      const response = await send({ ...command, body })
+      if (!isGradeSuccess(response)) throw new Error('لم يؤكد الخادم حفظ التقييم')
+      gradeBaselines.set(target.key, target)
+      applySnapshotToRow(target)
+    }
+
+    return {
+      id: nextId(),
+      title: `تعديل تقييم ${after.label}`,
+      detail: `من ${before.score ?? '—'} إلى ${after.score ?? '—'}${gradePart}`,
+      at: Date.now(),
+      undo: async () => {
+        await replay(before)
+        return makeGradeAction(command, before, after)
+      },
+      redo: async () => {
+        await replay(after)
+        return makeGradeAction(command, before, after)
+      },
+    }
+  }
+
+  function handleGradeChange(
+    method: string,
+    url: URL,
+    body: unknown,
+    headers: Record<string, string> | undefined,
+    json: unknown,
+  ): void {
+    syncGradeBaseline()
+    const bodyObj = asObject(body) ?? {}
+    const row = findGradeRowFromBody(bodyObj)
+    if (!row) return
+
+    const after = snapshotGradeRow(row)
+    if (!after) return
+    const before = gradeBaselines.get(after.key)
+    if (!before || sameGradeSnapshot(before, after)) return
+    if (!isGradeSuccess(json)) return
+
+    const command: HttpCommand = {
+      method: method as HttpMethod,
+      url: url.href,
+      body: bodyObj,
+      headers,
+    }
+    pushAction(makeGradeAction(command, before, after))
+    gradeBaselines.set(after.key, after)
+  }
+
+  function installGradeListeners(): void {
+    if (normalisePath(location.pathname) !== '/evaluation') return
+    const remember = (event: Event): void => {
+      const row = gradeRowFromTarget(event.target)
+      if (!row) return
+      lastTouchedGradeRow = row
+      const snapshot = snapshotGradeRow(row)
+      if (snapshot) gradeBaselines.set(snapshot.key, snapshot)
+    }
+    document.addEventListener('focusin', remember)
+    document.addEventListener('change', remember)
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', syncGradeBaseline, { once: true })
+    } else {
+      syncGradeBaseline()
     }
   }
 
@@ -494,6 +759,14 @@ function createController(): UndoRedoController {
     }
 
     if (!enabled) return
+
+    if (normalisePath(location.pathname) === '/evaluation' && method !== 'GET') {
+      const gradeBody = asObject(body) ?? {}
+      if (isGradeRequest(url, gradeBody)) {
+        handleGradeChange(method, url, gradeBody, before.headers, json)
+        return
+      }
+    }
 
     if (method === 'POST' && url.pathname === '/attendance') {
       handleAttendanceAdd(body, json, before)
@@ -607,6 +880,7 @@ function createController(): UndoRedoController {
     ;(page as Record<string, unknown>).__tamperinaUndoRedoHooks = true
     installFetchHook()
     installXhrHook()
+    installGradeListeners()
   }
 
   function describeError(error: unknown): string {

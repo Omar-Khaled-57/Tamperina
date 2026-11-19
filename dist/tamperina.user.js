@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tamperina
 // @namespace    https://github.com/Omar-Khaled-57/Tamperina
-// @version      0.0.4
+// @version      0.0.5
 // @author       Omar Khaled
 // @description  Pixel mascot launcher and growing toolkit for the Ahmed Zakaria platform
 // @supportURL   https://github.com/Omar-Khaled-57/Tamperina/issues
@@ -151,6 +151,17 @@
 		}
 		if (typeof body.entries === "function") return Object.fromEntries(Array.from(body.entries()));
 	}
+	function encodeBody(body, headers) {
+		if (String(headers?.["content-type"] ?? "").toLowerCase().includes("application/x-www-form-urlencoded")) {
+			const params = new URLSearchParams();
+			for (const [key, value] of Object.entries(body)) {
+				if (value == null) continue;
+				params.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+			}
+			return params.toString();
+		}
+		return JSON.stringify(body);
+	}
 	function replayHeaders(value) {
 		if (!value) return {};
 		const entries = [];
@@ -165,7 +176,8 @@
 		const allowed = new Set([
 			"x-csrf-token",
 			"x-xsrf-token",
-			"x-requested-with"
+			"x-requested-with",
+			"content-type"
 		]);
 		const result = {};
 		for (const [key, item] of entries) {
@@ -259,6 +271,107 @@
 			lessonId: null
 		};
 	}
+	function gradeCodeFromRow(row) {
+		return (row.querySelector(".evaluation-student__info small")?.textContent?.trim() ?? "").split("·")[0]?.trim() || row.getAttribute("data-student-code") || row.getAttribute("data-student-id") || row.querySelector(".student-code")?.textContent?.trim() || "";
+	}
+	function gradeRowKey(row) {
+		const code = gradeCodeFromRow(row);
+		return code ? `${normalisePath(location.pathname)}|${code}` : null;
+	}
+	function gradeRowLabel(row) {
+		const name = row.querySelector(".evaluation-student__info strong")?.textContent?.trim() || "";
+		const code = gradeCodeFromRow(row);
+		return name && code ? `${name} (${code})` : name || code || "الطالب";
+	}
+	function gradeRowFromTarget(target) {
+		return target?.closest?.(".evaluation-table tbody tr") ?? null;
+	}
+	function snapshotGradeRow(row) {
+		const key = gradeRowKey(row);
+		if (!key) return null;
+		const form = row.querySelector("form");
+		const fields = [];
+		for (const element of Array.from(form?.elements ?? [])) {
+			const control = element;
+			const name = control.name;
+			if (!name || /(?:^|_)(?:token|csrf|_token)|csrf/i.test(name)) continue;
+			const type = control.tagName === "INPUT" ? control.type : control.tagName.toLowerCase();
+			if (type === "button" || type === "submit" || type === "reset") continue;
+			const checked = type === "checkbox" || type === "radio" ? control.checked : void 0;
+			fields.push({
+				name,
+				type,
+				value: control.value ?? "",
+				...checked === void 0 ? {} : { checked }
+			});
+		}
+		const score = form?.querySelector("[name=\"exam_score\"], [name=\"score\"]")?.value;
+		const grade = form?.querySelector("[name=\"grade\"], [name=\"evaluation\"], [name=\"estimation\"]")?.value;
+		return {
+			key,
+			code: gradeCodeFromRow(row),
+			label: gradeRowLabel(row),
+			fields,
+			...score == null ? {} : { score },
+			...grade == null ? {} : { grade }
+		};
+	}
+	function sameGradeSnapshot(a, b) {
+		if (a.key !== b.key) return false;
+		const left = new Map(a.fields.map((field) => [field.name, field]));
+		const right = new Map(b.fields.map((field) => [field.name, field]));
+		if (left.size !== right.size) return false;
+		for (const [name, field] of left) {
+			const other = right.get(name);
+			if (!other || field.value !== other.value || field.checked !== other.checked) return false;
+		}
+		return true;
+	}
+	function patchGradeBody(body, snapshot) {
+		const result = { ...body };
+		const byName = new Map(snapshot.fields.map((field) => [field.name, field]));
+		for (const [name, field] of byName) {
+			if (!(name in result)) continue;
+			if (field.type === "checkbox") result[name] = Boolean(field.checked);
+			else if (field.type === "radio") {
+				if (field.checked) result[name] = field.value;
+			} else result[name] = field.value;
+		}
+		const score = snapshot.score ?? byName.get("exam_score")?.value ?? byName.get("score")?.value;
+		if (score != null) {
+			for (const key of ["exam_score", "score"]) if (key in result) result[key] = score;
+		}
+		const grade = snapshot.grade ?? byName.get("grade")?.value ?? byName.get("evaluation")?.value ?? byName.get("estimation")?.value;
+		if (grade != null) {
+			for (const key of [
+				"grade",
+				"evaluation",
+				"estimation"
+			]) if (key in result) result[key] = grade;
+		}
+		return result;
+	}
+	var GRADE_BODY_KEYS = new Set([
+		"exam_score",
+		"score",
+		"grade",
+		"evaluation",
+		"estimation",
+		"degree",
+		"mark",
+		"result"
+	]);
+	function isGradeRequest(url, body) {
+		const keys = Object.keys(body).map((key) => key.toLowerCase());
+		if (keys.some((key) => GRADE_BODY_KEYS.has(key))) return true;
+		return /(?:evaluation|grade|exam)/i.test(url.pathname) && keys.length > 0;
+	}
+	function isGradeSuccess(value) {
+		if (!value) return true;
+		const obj = asObject(value);
+		if (!obj) return true;
+		return obj.success !== false && obj.ok !== false && obj.deleted !== false;
+	}
 	function describeRequest(input, init) {
 		const requestLike = input;
 		const rawUrl = typeof input === "string" ? input : typeof requestLike?.url === "string" ? requestLike.url : String(input);
@@ -277,6 +390,8 @@
 		const future = [];
 		const listeners = new Set();
 		const records = new Map();
+		const gradeBaselines = new Map();
+		let lastTouchedGradeRow = null;
 		let enabled = loadEnabled();
 		let busy = false;
 		let sequence = 0;
@@ -294,6 +409,8 @@
 			past.length = 0;
 			future.length = 0;
 			records.clear();
+			gradeBaselines.clear();
+			lastTouchedGradeRow = null;
 			notify();
 		}
 		const nextId = () => `undo-${Date.now()}-${++sequence}`;
@@ -342,10 +459,10 @@
 				credentials: "same-origin",
 				headers: {
 					Accept: "application/json",
-					...command.headers,
-					...command.body ? { "Content-Type": "application/json" } : {}
+					...command.body ? { "Content-Type": "application/json" } : {},
+					...command.headers
 				},
-				body: command.body ? JSON.stringify(command.body) : void 0
+				body: command.body ? encodeBody(command.body, command.headers) : void 0
 			});
 			if (!response.ok) throw new Error(`فشل الطلب (${response.status})`);
 			return parseJson(await response.text());
@@ -396,6 +513,100 @@
 					return makeRemovedAction(record, headers);
 				}
 			};
+		}
+		function syncGradeBaseline() {
+			if (normalisePath(location.pathname) !== "/evaluation") return;
+			for (const row of Array.from(document.querySelectorAll(".evaluation-table tbody tr"))) {
+				const snapshot = snapshotGradeRow(row);
+				if (snapshot && !gradeBaselines.has(snapshot.key)) gradeBaselines.set(snapshot.key, snapshot);
+			}
+		}
+		function findGradeRowByKey(key) {
+			return Array.from(document.querySelectorAll(".evaluation-table tbody tr")).find((row) => gradeRowKey(row) === key) ?? null;
+		}
+		function findGradeRowFromBody(body) {
+			const candidates = [
+				"student_user_id",
+				"student_id",
+				"student",
+				"user_id",
+				"code",
+				"student_code"
+			].map((key) => body[key]).filter((value) => value != null && value !== "").map((value) => String(value));
+			if (!candidates.length) return lastTouchedGradeRow;
+			return Array.from(document.querySelectorAll(".evaluation-table tbody tr")).find((row) => {
+				const key = gradeRowKey(row) ?? "";
+				return candidates.some((value) => key.endsWith(`|${value}`));
+			}) ?? lastTouchedGradeRow;
+		}
+		function applySnapshotToRow(snapshot) {
+			const row = findGradeRowByKey(snapshot.key);
+			if (!row) return;
+			const controls = Array.from(row.querySelector("form")?.elements ?? []);
+			for (const field of snapshot.fields) {
+				const control = controls.find((item) => item.name === field.name);
+				if (!control) continue;
+				if (field.type === "checkbox" || field.type === "radio") control.checked = Boolean(field.checked);
+				else control.value = field.value;
+			}
+		}
+		function makeGradeAction(command, before, after) {
+			const gradePart = before.grade && after.grade && before.grade !== after.grade ? ` · ${before.grade} ← ${after.grade}` : "";
+			const replay = async (target) => {
+				const body = command.body ? patchGradeBody(command.body, target) : void 0;
+				if (!isGradeSuccess(await send({
+					...command,
+					body
+				}))) throw new Error("لم يؤكد الخادم حفظ التقييم");
+				gradeBaselines.set(target.key, target);
+				applySnapshotToRow(target);
+			};
+			return {
+				id: nextId(),
+				title: `تعديل تقييم ${after.label}`,
+				detail: `من ${before.score ?? "—"} إلى ${after.score ?? "—"}${gradePart}`,
+				at: Date.now(),
+				undo: async () => {
+					await replay(before);
+					return makeGradeAction(command, before, after);
+				},
+				redo: async () => {
+					await replay(after);
+					return makeGradeAction(command, before, after);
+				}
+			};
+		}
+		function handleGradeChange(method, url, body, headers, json) {
+			syncGradeBaseline();
+			const bodyObj = asObject(body) ?? {};
+			const row = findGradeRowFromBody(bodyObj);
+			if (!row) return;
+			const after = snapshotGradeRow(row);
+			if (!after) return;
+			const before = gradeBaselines.get(after.key);
+			if (!before || sameGradeSnapshot(before, after)) return;
+			if (!isGradeSuccess(json)) return;
+			pushAction(makeGradeAction({
+				method,
+				url: url.href,
+				body: bodyObj,
+				headers
+			}, before, after));
+			gradeBaselines.set(after.key, after);
+		}
+		function installGradeListeners() {
+			if (normalisePath(location.pathname) !== "/evaluation") return;
+			const remember = (event) => {
+				const row = gradeRowFromTarget(event.target);
+				if (!row) return;
+				lastTouchedGradeRow = row;
+				const snapshot = snapshotGradeRow(row);
+				if (snapshot) gradeBaselines.set(snapshot.key, snapshot);
+			};
+			document.addEventListener("focusin", remember);
+			document.addEventListener("change", remember);
+			if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", syncGradeBaseline, { once: true });
+			else syncGradeBaseline();
 		}
 		function pushAction(action) {
 			past.push(action);
@@ -457,6 +668,13 @@
 				return;
 			}
 			if (!enabled) return;
+			if (normalisePath(location.pathname) === "/evaluation" && method !== "GET") {
+				const gradeBody = asObject(body) ?? {};
+				if (isGradeRequest(url, gradeBody)) {
+					handleGradeChange(method, url, gradeBody, before.headers, json);
+					return;
+				}
+			}
 			if (method === "POST" && url.pathname === "/attendance") {
 				handleAttendanceAdd(body, json, before);
 				return;
@@ -536,6 +754,7 @@
 			page.__tamperinaUndoRedoHooks = true;
 			installFetchHook();
 			installXhrHook();
+			installGradeListeners();
 		}
 		function describeError(error) {
 			return error instanceof Error ? error.message : String(error);
@@ -719,8 +938,11 @@
 			minute: "2-digit"
 		}).format(timestamp);
 	}
+	function isAttendancePage() {
+		return location.pathname.replace(/\/$/, "") === "/attendance/scan";
+	}
 	function featureScopeLabel() {
-		return location.pathname.replace(/\/$/, "") === "/evaluation" ? "التقييم — قيد التقاط العملية" : "حضور الطلاب";
+		return location.pathname.replace(/\/$/, "") === "/evaluation" ? "تقييم الحصة" : "حضور الطلاب";
 	}
 	function isEditableTarget(target) {
 		const el = target;
@@ -910,7 +1132,7 @@
         ${historyHtml}
 
         <p class="feature-note">${icons.shieldAlert}
-          السجل مؤقت لهذه الصفحة فقط، ولا يُحفظ بعد تحديثها. مفتاح التشغيل هو السماح بتنفيذ التراجع.
+          السجل مؤقت لهذه الصفحة فقط، ولا يُحفظ بعد تحديثها. مفتاح التشغيل هو السماح بتنفيذ التراجع. في صفحة الحضور تعمل الاختصارات حتى أثناء كتابة حقل البحث.
         </p>
       </section>
     `;
@@ -1081,7 +1303,7 @@
 		document.addEventListener("keydown", (event) => {
 			if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.altKey) {
 				const redoShortcut = event.code === "KeyY" || event.code === "KeyZ" && event.shiftKey;
-				if ((event.code === "KeyZ" && !event.shiftKey || redoShortcut) && undoRedo.supported && undoRedo.enabled && !isEditableTarget(event.target)) {
+				if ((event.code === "KeyZ" && !event.shiftKey || redoShortcut) && undoRedo.supported && undoRedo.enabled && (isAttendancePage() || !isEditableTarget(event.target))) {
 					event.preventDefault();
 					if (redoShortcut) undoRedo.redo();
 					else undoRedo.undo();
