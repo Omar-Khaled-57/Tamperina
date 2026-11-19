@@ -1209,6 +1209,9 @@
 }
 
 .bulk-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 7px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1219,6 +1222,12 @@
   font-weight: 700;
   cursor: pointer;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.bulk-mode-btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
 }
 
 .bulk-mode-btn:hover {
@@ -1250,9 +1259,18 @@
 }
 
 .bulk-pay-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--text);
   font-size: 12px;
   font-weight: 800;
+}
+
+.bulk-pay-head strong svg {
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
 }
 
 .bulk-pay-search-wrap {

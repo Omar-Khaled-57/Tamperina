@@ -18,11 +18,17 @@ export interface StudentCandidate {
   code: string
 }
 
+export interface ParsedEntryPayment {
+  status: PaymentStatus
+  amountPaid?: number
+}
+
 export interface ParsedCode {
   kind: 'code'
   key: string
   raw: string
   code: string
+  payment?: ParsedEntryPayment
 }
 
 export interface ParsedName {
@@ -30,6 +36,7 @@ export interface ParsedName {
   key: string
   raw: string
   query: string
+  payment?: ParsedEntryPayment
 }
 
 export interface ParseEntriesResult {
@@ -52,6 +59,7 @@ export interface NameRow {
   studentName?: string
   candidates: StudentCandidate[]
   message?: string
+  payment?: ParsedEntryPayment
 }
 
 export interface ScanFormInfo {
@@ -159,6 +167,50 @@ function isArabicOrNameLike(value: string): boolean {
   return /[\u0600-\u06FF]/.test(value) || /\s/.test(value.trim())
 }
 
+function normalizeStatusToken(value: string): PaymentStatus | null {
+  const v = value.trim().toLowerCase()
+  if (!v) return null
+  if (v === 'كامل' || v === 'paid' || v === 'full') return 'paid'
+  if (v === 'جزئي' || v === 'partial') return 'partial'
+  if (v === 'مخفض' || v === 'مخفض/مجاني' || v === 'مجاني' || v === 'discounted' || v === 'free') return 'discounted'
+  if (v === 'نسي' || v === 'نسي الفلوس' || v === 'forgot' || v === 'forgotten') return 'forgotten'
+  return null
+}
+
+function parseAmountToken(value: string): number | undefined {
+  const cleaned = value.trim().replace(/[^\d.,-]/g, '').replace(',', '.')
+  if (!cleaned) return undefined
+  const num = Number(cleaned)
+  return Number.isFinite(num) ? num : undefined
+}
+
+function parseInlinePayment(segments: string[]): { identifier: string, payment?: ParsedEntryPayment } | null {
+  if (segments.length < 2) return null
+  const last = normalizeStatusToken(segments[segments.length - 1])
+  if (last) {
+    if (segments.length === 2) {
+      return { identifier: segments[0], payment: { status: last } }
+    }
+    if (segments.length >= 3) {
+      const amount = parseAmountToken(segments[segments.length - 2])
+      const identifier = segments.slice(0, segments.length - 2).join(',').trim()
+      if (!identifier) return null
+      return {
+        identifier,
+        payment: amount == null ? { status: last } : { status: last, amountPaid: amount },
+      }
+    }
+  }
+  // identifier, amount (no explicit status) -> treat as partial with amount
+  if (segments.length === 2) {
+    const amount = parseAmountToken(segments[1])
+    if (amount != null && segments[0].trim()) {
+      return { identifier: segments[0], payment: { status: 'partial', amountPaid: amount } }
+    }
+  }
+  return null
+}
+
 export function parseBulkEntries(text: string): ParseEntriesResult {
   const normalizedText = normalizeDigits(text)
   const lines = normalizedText.split(/\r?\n/)
@@ -170,7 +222,7 @@ export function parseBulkEntries(text: string): ParseEntriesResult {
   let totalTokens = 0
   let seq = 0
 
-  const pushCode = (raw: string, token: string): void => {
+  const pushCode = (raw: string, token: string, payment?: ParsedEntryPayment): void => {
     totalTokens++
     const code = token.toUpperCase()
     if (!CODE_RE.test(code)) {
@@ -182,48 +234,63 @@ export function parseBulkEntries(text: string): ParseEntriesResult {
       return
     }
     seenCodes.add(code)
-    codes.push({ kind: 'code', key: `c-${++seq}-${code}`, raw: raw.trim() || code, code })
+    codes.push({ kind: 'code', key: `c-${++seq}-${code}`, raw: raw.trim() || code, code, payment })
   }
 
-  const pushName = (raw: string): void => {
-    const query = raw.trim().replace(/\s+/g, ' ')
+  const pushName = (raw: string, queryOverride?: string, payment?: ParsedEntryPayment): void => {
+    const query = (queryOverride ?? raw).trim().replace(/\s+/g, ' ')
     if (!query) return
     totalTokens++
-    names.push({ kind: 'name', key: `n-${++seq}-${query}`, raw: query, query })
+    names.push({ kind: 'name', key: `n-${++seq}-${query}`, raw: raw.trim() || query, query, payment })
+  }
+
+  const pushEntry = (identifier: string, displayRaw: string, payment?: ParsedEntryPayment): void => {
+    const upper = identifier.trim().toUpperCase()
+    if (CODE_RE.test(upper) && !/[\u0600-\u06FF]/.test(identifier)) {
+      pushCode(displayRaw, upper, payment)
+      return
+    }
+    // space-separated codes without payment info
+    if (!payment && !/[\u0600-\u06FF]/.test(identifier)) {
+      const spaceParts = identifier.trim().split(/\s+/).map((p) => p.trim()).filter(Boolean)
+      if (spaceParts.length > 1 && spaceParts.every((p) => CODE_RE.test(p.toUpperCase()))) {
+        for (const sp of spaceParts) pushCode(sp, sp.toUpperCase())
+        return
+      }
+    }
+    if (/^[A-Z0-9_-]+$/i.test(identifier.trim()) && !isArabicOrNameLike(identifier.trim()) && identifier.trim().length < 3) {
+      totalTokens++
+      invalid.push(identifier.trim())
+      return
+    }
+    pushName(displayRaw, identifier.trim(), payment)
   }
 
   for (const line of lines) {
     const trimmed = line.trim()
     if (!trimmed) continue
 
-    // Comma/semicolon separated parts. Arabic text -> treat whole line as a name.
+    // Split by comma/Arabic comma/semicolon for structured parsing
+    const segments = trimmed.split(/[,\u060C;\u061B]+/).map((p) => p.trim()).filter(Boolean)
+    if (!segments.length) continue
+
+    // Try structured format: identifier[, amount][, status]
+    const structured = parseInlinePayment(segments)
+    if (structured) {
+      pushEntry(structured.identifier, trimmed, structured.payment)
+      continue
+    }
+
     const hasArabic = /[\u0600-\u06FF]/.test(trimmed)
-    const parts = hasArabic ? [trimmed] : trimmed.split(/[,\u060C;\u061B]+/).map((p) => p.trim()).filter(Boolean)
-    const effectiveParts = parts.length ? parts : [trimmed]
+    if (hasArabic) {
+      // Whole Arabic line is a name (no structured payment detected)
+      pushName(trimmed)
+      continue
+    }
 
-    for (const part of effectiveParts) {
-      const upper = part.toUpperCase()
-      if (CODE_RE.test(upper) && !/[\u0600-\u06FF]/.test(part)) {
-        pushCode(part, upper)
-        continue
-      }
-
-      // Space-separated codes on a single line/part (e.g. "2349 2350")
-      if (!hasArabic) {
-        const spaceParts = part.split(/\s+/).map((p) => p.trim()).filter(Boolean)
-        if (spaceParts.length > 1 && spaceParts.every((p) => CODE_RE.test(p.toUpperCase()))) {
-          for (const sp of spaceParts) pushCode(sp, sp.toUpperCase())
-          continue
-        }
-      }
-
-      // Treat as name (or invalid short token)
-      if (/^[A-Z0-9_-]+$/i.test(part) && !isArabicOrNameLike(part) && part.length < 3) {
-        totalTokens++
-        invalid.push(part)
-        continue
-      }
-      pushName(part)
+    // Non-Arabic, no structured payment: treat each segment as a code/name token
+    for (const part of segments) {
+      pushEntry(part, part)
     }
   }
 

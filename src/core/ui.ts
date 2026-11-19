@@ -223,8 +223,8 @@ export function mountShell(): void {
                 <div class="bulk-field">
                   <span>نوع الحصة</span>
                   <div class="bulk-mode-toggle" data-bulk-mode-toggle role="group" aria-label="نوع الحصة">
-                    <button type="button" class="bulk-mode-btn active" data-mode="center" aria-pressed="true">🏢 سنتر</button>
-                    <button type="button" class="bulk-mode-btn" data-mode="school" aria-pressed="false">🏫 مدرسة</button>
+                    <button type="button" class="bulk-mode-btn active" data-mode="center" aria-pressed="true">${icons.center}<span>سنتر</span></button>
+                    <button type="button" class="bulk-mode-btn" data-mode="school" aria-pressed="false">${icons.school}<span>مدرسة</span></button>
                   </div>
                 </div>
               </div>
@@ -246,7 +246,7 @@ export function mountShell(): void {
 
               <div class="bulk-pay-section" data-bulk-pay-section hidden>
                 <div class="bulk-pay-head">
-                  <strong>💳 جدول المدفوعات — مدرسة</strong>
+                  <strong>${icons.payment}<span>جدول المدفوعات — مدرسة</span></strong>
                   <div class="bulk-pay-search-wrap">
                     <input type="search" class="bulk-pay-search" data-bulk-pay-search placeholder="ابحث بالاسم أو الكود…" autocomplete="off" />
                   </div>
@@ -672,11 +672,40 @@ export function mountShell(): void {
   }
 
   /** Build / rebuild the payment override table rows for school mode. */
+  function seedPaymentOverridesFromParsed(): void {
+    if (!bulkParsed) return
+    // Seed from direct codes
+    for (const item of bulkParsed.codes) {
+      if (!item.payment) continue
+      const code = item.code.toUpperCase()
+      if (!bulkPayOverrides.has(code)) {
+        bulkPayOverrides.set(code, {
+          studentCode: code,
+          status: item.payment.status,
+          amountPaid: item.payment.amountPaid,
+        })
+      }
+    }
+    // Seed from resolved names
+    for (const row of bulkNameRows) {
+      if (!row.payment || row.status !== 'resolved' || !row.code) continue
+      const code = row.code.toUpperCase()
+      if (!bulkPayOverrides.has(code)) {
+        bulkPayOverrides.set(code, {
+          studentCode: code,
+          status: row.payment.status,
+          amountPaid: row.payment.amountPaid,
+        })
+      }
+    }
+  }
+
   function renderPayTable(filterQuery = ''): void {
     if (bulkPayMode !== 'school') {
       bulkPaySection.hidden = true
       return
     }
+    if (bulkParsed) seedPaymentOverridesFromParsed()
     // Collect all resolved entries (codes + resolved names)
     const allEntries: Array<{ code: string; label: string }> = []
     if (bulkParsed) {
@@ -1005,8 +1034,11 @@ export function mountShell(): void {
       status: lessonId ? 'loading' : 'error',
       candidates: [],
       message: lessonId ? 'جارٍ البحث…' : 'حدد رقم الحصة أولًا.',
+      payment: entry.payment,
     }))
     bulkArmed = false
+    bulkPayOverrides.clear()
+    seedPaymentOverridesFromParsed()
     bulkResolving = bulkNameRows.length > 0 && !!lessonId
     renderBulkAnalysis()
 
@@ -1021,7 +1053,18 @@ export function mountShell(): void {
       const current = bulkNameRows[i]
       const resolved = await resolveNameEntry(current, lessonId)
       if (token !== bulkAnalysisToken) return
-      bulkNameRows[i] = resolved
+      // Preserve pending payment info from original name row
+      bulkNameRows[i] = { ...resolved, payment: current.payment }
+      if (bulkNameRows[i].payment && bulkNameRows[i].status === 'resolved' && bulkNameRows[i].code) {
+        const code = bulkNameRows[i].code!.toUpperCase()
+        if (!bulkPayOverrides.has(code)) {
+          bulkPayOverrides.set(code, {
+            studentCode: code,
+            status: bulkNameRows[i].payment!.status,
+            amountPaid: bulkNameRows[i].payment!.amountPaid,
+          })
+        }
+      }
       renderBulkAnalysis()
     }
 
@@ -1039,9 +1082,16 @@ export function mountShell(): void {
     bulkArmed = false
     bulkNameRows[index] = { ...bulkNameRows[index], query: nextQuery.trim() || bulkNameRows[index].query, status: 'loading', message: 'جارٍ البحث…' }
     renderBulkAnalysis()
+    const payment = bulkNameRows[index].payment
     const resolved = await resolveNameEntry(bulkNameRows[index], lessonId)
     if (token !== bulkAnalysisToken) return
-    bulkNameRows[index] = resolved
+    bulkNameRows[index] = { ...resolved, payment }
+    if (payment && bulkNameRows[index].status === 'resolved' && bulkNameRows[index].code) {
+      const code = bulkNameRows[index].code!.toUpperCase()
+      if (!bulkPayOverrides.has(code)) {
+        bulkPayOverrides.set(code, { studentCode: code, status: payment.status, amountPaid: payment.amountPaid })
+      }
+    }
     renderBulkAnalysis()
   }
 
@@ -1197,6 +1247,14 @@ export function mountShell(): void {
   bulkCodesInput.addEventListener('input', invalidateBulkAnalysis)
   bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkAnalysis() })
 
+  function updateBulkInputPlaceholder(): void {
+    if (bulkPayMode === 'school') {
+      bulkCodesInput.placeholder = '2017, 45, كامل\n2016, 10, مخفض\nأحمد محمد, 0, نسي الفلوس'
+    } else {
+      bulkCodesInput.placeholder = '2349\nأحمد محمد\n2351'
+    }
+  }
+
   // ---- mode toggle ---------------------------------------------------------
   for (const btn of bulkModeBtns) {
     btn.addEventListener('click', () => {
@@ -1205,6 +1263,7 @@ export function mountShell(): void {
       applyPaymentMode(mode)
       bulkArmed = false
       bulkPayOverrides.clear()
+      updateBulkInputPlaceholder()
       // Preserve analysis/resolution; just re-render to show/hide payment table.
       if (bulkParsed) {
         renderBulkAnalysis()
@@ -1316,6 +1375,7 @@ export function mountShell(): void {
   refreshBulkLesson()
   // Auto-detect mode from the page
   applyPaymentMode(detectPagePaymentMode())
+  updateBulkInputPlaceholder()
   renderBulkAnalysis()
   undoRedo.subscribe(() => {
     refreshBulkLesson()
