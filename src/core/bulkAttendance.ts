@@ -234,14 +234,16 @@ export function parseBulkEntries(text: string): ParseEntriesResult {
       return
     }
     seenCodes.add(code)
-    codes.push({ kind: 'code', key: `c-${++seq}-${code}`, raw: raw.trim() || code, code, payment })
+    const finalPayment = payment ?? { status: 'paid' as PaymentStatus, amountPaid: 45 }
+    codes.push({ kind: 'code', key: `c-${++seq}-${code}`, raw: raw.trim() || code, code, payment: finalPayment })
   }
 
   const pushName = (raw: string, queryOverride?: string, payment?: ParsedEntryPayment): void => {
     const query = (queryOverride ?? raw).trim().replace(/\s+/g, ' ')
     if (!query) return
     totalTokens++
-    names.push({ kind: 'name', key: `n-${++seq}-${query}`, raw: raw.trim() || query, query, payment })
+    const finalPayment = payment ?? { status: 'paid' as PaymentStatus, amountPaid: 45 }
+    names.push({ kind: 'name', key: `n-${++seq}-${query}`, raw: raw.trim() || query, query, payment: finalPayment })
   }
 
   const pushEntry = (identifier: string, displayRaw: string, payment?: ParsedEntryPayment): void => {
@@ -544,6 +546,89 @@ export async function runBulkAttendance(options: {
   let failed = 0
   let stopped = false
 
+  const recordRow = (row: BulkRowResult): void => {
+    rows.push(row)
+    if (row.status === 'created') created++
+    else if (row.status === 'duplicate') duplicates++
+    else if (row.status === 'skipped-known') skipped++
+    else failed++
+    options.onRow(row)
+  }
+
+  // ---- مدرسة (school) mode: fast parallel direct POSTs ----------------------
+  if (paymentMode === 'school') {
+    const lessonId = options.lessonId ?? currentLessonIdFromPage() ?? ''
+    if (!lessonId) {
+      recordRow({ code: '', status: 'error', message: 'رقم الحصة غير معروف.', at: Date.now() })
+      return { rows, created, duplicates, skipped, failed, stopped: true }
+    }
+
+    const known = new Set(undoRedo.knownRecordCodes.map((c) => c.toUpperCase()))
+    const toRun: Array<{ code: string, label?: string }> = []
+    for (const entry of options.entries) {
+      const code = entry.code.toUpperCase()
+      if (options.signal.stop) {
+        stopped = true
+        break
+      }
+      if (known.has(code)) {
+        recordRow({ code, label: entry.label, status: 'skipped-known', message: 'مسجّل بالفعل', at: Date.now() })
+        continue
+      }
+      toRun.push({ code, label: entry.label })
+    }
+
+    const concurrency = 10
+    let index = 0
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        if (options.signal.stop) {
+          stopped = true
+          return
+        }
+        const i = index++
+        if (i >= toRun.length) return
+        const entry = toRun[i]
+        const code = entry.code.toUpperCase()
+        const override = overrideMap.get(code)
+        const wait = waitForCode(code, timeoutMs)
+        const result = await submitSchoolAttendance(code, lessonId, override)
+        if (!result.ok) {
+          recordRow({ code, label: entry.label, status: 'error', message: result.message, at: Date.now() })
+          if (!result.message.includes('مسجّل') && !result.message.includes('سبق')) {
+            options.signal.stop = true
+            stopped = true
+          }
+          continue
+        }
+        // Race observer confirmation with a short cap so a slow/missed event doesn't stall the batch.
+        const event = await Promise.race([
+          wait,
+          sleep(2000).then(() => 'timeout' as const),
+        ])
+        if (event === 'timeout') {
+          recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', at: Date.now() })
+        } else if (event.type === 'add') {
+          const payLabel = override ? {
+            paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي الفلوس',
+          }[override.status] : 'كامل'
+          recordRow({ code, label: entry.label, status: 'created', message: `تم التسجيل — ${payLabel}`, recordId: event.record.id, at: Date.now() })
+        } else if (event.type === 'duplicate') {
+          recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: event.record.id, at: Date.now() })
+        } else {
+          recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() })
+        }
+      }
+    }
+
+    const workers = Array.from({ length: Math.min(concurrency, toRun.length || 1) }, () => worker())
+    await Promise.all(workers)
+    if (options.signal.stop && !stopped) stopped = true
+    return { rows, created, duplicates, skipped, failed, stopped }
+  }
+
+  // ---- سنتر (center) mode: sequential scan-form loop (single input/form) ----
   for (const entry of options.entries) {
     const code = entry.code.toUpperCase()
     if (options.signal.stop) {
@@ -552,74 +637,13 @@ export async function runBulkAttendance(options: {
     }
 
     if (undoRedo.knownRecordCodes.includes(code)) {
-      const row: BulkRowResult = {
-        code,
-        label: entry.label,
-        status: 'skipped-known',
-        message: 'مسجّل بالفعل',
-        at: Date.now(),
-      }
-      rows.push(row)
-      skipped++
-      options.onRow(row)
+      recordRow({ code, label: entry.label, status: 'skipped-known', message: 'مسجّل بالفعل', at: Date.now() })
       continue
     }
 
-    // ---- مدرسة (school) mode: direct fetch, no form/dialog interaction --------
-    if (paymentMode === 'school') {
-      const lessonId = options.lessonId ?? currentLessonIdFromPage() ?? ''
-      if (!lessonId) {
-        const row: BulkRowResult = { code, label: entry.label, status: 'error', message: 'رقم الحصة غير معروف.', at: Date.now() }
-        rows.push(row); failed++; options.onRow(row); stopped = true; break
-      }
-      const override = overrideMap.get(code)
-      const wait = waitForCode(code, timeoutMs)
-      const result = await submitSchoolAttendance(code, lessonId, override)
-      if (!result.ok) {
-        // No attendance event will fire — cancel the wait
-        const row: BulkRowResult = { code, label: entry.label, status: 'error', message: result.message, at: Date.now() }
-        rows.push(row); failed++; options.onRow(row)
-        // If it's a server error (not a duplicate/validation), stop
-        if (!result.message.includes('مسجّل') && !result.message.includes('سبق')) { stopped = true; break }
-        continue
-      }
-      // Wait for the undoRedo observer to confirm the attendance event
-      const event = await wait
-      if (event === 'timeout') {
-        // The POST succeeded but the event didn't come — still count as created
-        // (the undoRedo observer may not have caught it, but the record is there)
-        const row: BulkRowResult = { code, label: entry.label, status: 'created', message: 'تم التسجيل (تأكيد المراقب لم يصل)', at: Date.now() }
-        rows.push(row); created++; options.onRow(row)
-      } else if (event.type === 'add') {
-        const payLabel = override ? {
-          paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي الفلوس',
-        }[override.status] : 'كامل'
-        const row: BulkRowResult = { code, label: entry.label, status: 'created', message: `تم التسجيل — ${payLabel}`, recordId: event.record.id, at: Date.now() }
-        rows.push(row); created++; options.onRow(row)
-      } else if (event.type === 'duplicate') {
-        const row: BulkRowResult = { code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: event.record.id, at: Date.now() }
-        rows.push(row); duplicates++; options.onRow(row)
-      } else {
-        const row: BulkRowResult = { code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() }
-        rows.push(row); failed++; options.onRow(row)
-      }
-      if (!options.signal.stop) await sleep(150)
-      continue
-    }
-
-    // ---- سنتر (center) mode: use the scan form as before ---------------------
     const scan = detectScanForm()
     if (!scan) {
-      const row: BulkRowResult = {
-        code,
-        label: entry.label,
-        status: 'error',
-        message: 'تعذّر العثور على نموذج/حقل الإدخال',
-        at: Date.now(),
-      }
-      rows.push(row)
-      failed++
-      options.onRow(row)
+      recordRow({ code, label: entry.label, status: 'error', message: 'تعذّر العثور على نموذج/حقل الإدخال', at: Date.now() })
       stopped = true
       break
     }
@@ -631,58 +655,21 @@ export async function runBulkAttendance(options: {
     const result = await wait
 
     if (result === 'timeout') {
-      const row: BulkRowResult = {
-        code,
-        label: entry.label,
-        status: 'timeout',
-        message: 'لم يصل تأكيد من الخادم',
-        at: Date.now(),
-      }
-      rows.push(row)
-      failed++
-      options.onRow(row)
+      recordRow({ code, label: entry.label, status: 'timeout', message: 'لم يصل تأكيد من الخادم', at: Date.now() })
       stopped = true
       break
     }
 
     if (result.type === 'add') {
-      const row: BulkRowResult = {
-        code,
-        label: entry.label,
-        status: 'created',
-        message: 'تم التسجيل',
-        recordId: result.record.id,
-        at: Date.now(),
-      }
-      rows.push(row)
-      created++
-      options.onRow(row)
+      recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', recordId: result.record.id, at: Date.now() })
     } else if (result.type === 'duplicate') {
-      const row: BulkRowResult = {
-        code,
-        label: entry.label,
-        status: 'duplicate',
-        message: 'مسجّل بالفعل',
-        recordId: result.record.id,
-        at: Date.now(),
-      }
-      rows.push(row)
-      duplicates++
-      options.onRow(row)
+      recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: result.record.id, at: Date.now() })
     } else {
-      const row: BulkRowResult = {
-        code,
-        label: entry.label,
-        status: 'error',
-        message: 'استجابة غير متوقعة',
-        at: Date.now(),
-      }
-      rows.push(row)
-      failed++
-      options.onRow(row)
+      recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() })
     }
 
-    if (!options.signal.stop) await sleep(150)
+    // Minimal pacing to let the form/site settle between submissions.
+    if (!options.signal.stop) await sleep(20)
   }
 
   if (options.signal.stop && !stopped) stopped = true

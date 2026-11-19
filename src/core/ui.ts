@@ -586,15 +586,27 @@ export function mountShell(): void {
   }
 
   featureList.addEventListener('click', (event) => {
-    const btn = (event.target as Element).closest<HTMLButtonElement>('[data-feature-toggle], [data-undo], [data-redo]')
+    const btn = (event.target as Element).closest<HTMLButtonElement>('[data-feature-toggle], [data-undo], [data-redo], [data-feature-id]')
     if (!btn || btn.disabled) return
     event.stopPropagation()
     if (btn.hasAttribute('data-feature-toggle')) {
       undoRedo.setEnabled(!undoRedo.enabled)
     } else if (btn.hasAttribute('data-undo')) {
       void undoRedo.undo()
-    } else {
+    } else if (btn.hasAttribute('data-redo')) {
       void undoRedo.redo()
+    } else if (btn.hasAttribute('data-feature-id')) {
+      const featureId = btn.dataset.featureId
+      const storageKey = `tamperina_${featureId}`
+      const current = localStorage.getItem(storageKey) === 'true'
+      const newState = !current
+      localStorage.setItem(storageKey, String(newState))
+      btn.setAttribute('aria-checked', String(newState))
+      if (featureId === 'center-modal') {
+        document.documentElement.classList.toggle('centered-payment-modal', newState)
+      } else if (featureId === 'hide-barcode') {
+        document.documentElement.classList.toggle('barcode-hidden', newState)
+      }
     }
   })
 

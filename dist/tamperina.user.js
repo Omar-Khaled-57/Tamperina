@@ -1180,24 +1180,32 @@
 				return;
 			}
 			seenCodes.add(code);
+			const finalPayment = payment ?? {
+				status: "paid",
+				amountPaid: 45
+			};
 			codes.push({
 				kind: "code",
 				key: `c-${++seq}-${code}`,
 				raw: raw.trim() || code,
 				code,
-				payment
+				payment: finalPayment
 			});
 		};
 		const pushName = (raw, queryOverride, payment) => {
 			const query = (queryOverride ?? raw).trim().replace(/\s+/g, " ");
 			if (!query) return;
 			totalTokens++;
+			const finalPayment = payment ?? {
+				status: "paid",
+				amountPaid: 45
+			};
 			names.push({
 				kind: "name",
 				key: `n-${++seq}-${query}`,
 				raw: raw.trim() || query,
 				query,
-				payment
+				payment: finalPayment
 			});
 		};
 		const pushEntry = (identifier, displayRaw, payment) => {
@@ -1453,6 +1461,136 @@
 		let skipped = 0;
 		let failed = 0;
 		let stopped = false;
+		const recordRow = (row) => {
+			rows.push(row);
+			if (row.status === "created") created++;
+			else if (row.status === "duplicate") duplicates++;
+			else if (row.status === "skipped-known") skipped++;
+			else failed++;
+			options.onRow(row);
+		};
+		if (paymentMode === "school") {
+			const lessonId = options.lessonId ?? currentLessonIdFromPage() ?? "";
+			if (!lessonId) {
+				recordRow({
+					code: "",
+					status: "error",
+					message: "رقم الحصة غير معروف.",
+					at: Date.now()
+				});
+				return {
+					rows,
+					created,
+					duplicates,
+					skipped,
+					failed,
+					stopped: true
+				};
+			}
+			const known = new Set(undoRedo.knownRecordCodes.map((c) => c.toUpperCase()));
+			const toRun = [];
+			for (const entry of options.entries) {
+				const code = entry.code.toUpperCase();
+				if (options.signal.stop) {
+					stopped = true;
+					break;
+				}
+				if (known.has(code)) {
+					recordRow({
+						code,
+						label: entry.label,
+						status: "skipped-known",
+						message: "مسجّل بالفعل",
+						at: Date.now()
+					});
+					continue;
+				}
+				toRun.push({
+					code,
+					label: entry.label
+				});
+			}
+			const concurrency = 10;
+			let index = 0;
+			const worker = async () => {
+				while (true) {
+					if (options.signal.stop) {
+						stopped = true;
+						return;
+					}
+					const i = index++;
+					if (i >= toRun.length) return;
+					const entry = toRun[i];
+					const code = entry.code.toUpperCase();
+					const override = overrideMap.get(code);
+					const wait = waitForCode(code, timeoutMs);
+					const result = await submitSchoolAttendance(code, lessonId, override);
+					if (!result.ok) {
+						recordRow({
+							code,
+							label: entry.label,
+							status: "error",
+							message: result.message,
+							at: Date.now()
+						});
+						if (!result.message.includes("مسجّل") && !result.message.includes("سبق")) {
+							options.signal.stop = true;
+							stopped = true;
+						}
+						continue;
+					}
+					const event = await Promise.race([wait, sleep(2e3).then(() => "timeout")]);
+					if (event === "timeout") recordRow({
+						code,
+						label: entry.label,
+						status: "created",
+						message: "تم التسجيل",
+						at: Date.now()
+					});
+					else if (event.type === "add") {
+						const payLabel = override ? {
+							paid: "كامل",
+							partial: "جزئي",
+							discounted: "مخفض",
+							forgotten: "نسي الفلوس"
+						}[override.status] : "كامل";
+						recordRow({
+							code,
+							label: entry.label,
+							status: "created",
+							message: `تم التسجيل — ${payLabel}`,
+							recordId: event.record.id,
+							at: Date.now()
+						});
+					} else if (event.type === "duplicate") recordRow({
+						code,
+						label: entry.label,
+						status: "duplicate",
+						message: "مسجّل بالفعل",
+						recordId: event.record.id,
+						at: Date.now()
+					});
+					else recordRow({
+						code,
+						label: entry.label,
+						status: "error",
+						message: "استجابة غير متوقعة",
+						at: Date.now()
+					});
+				}
+			};
+			const workers = Array.from({ length: Math.min(concurrency, toRun.length || 1) }, () => worker());
+			await Promise.all(workers);
+			if (options.signal.stop && !stopped) stopped = true;
+			return {
+				rows,
+				created,
+				duplicates,
+				skipped,
+				failed,
+				stopped
+			};
+		}
 		for (const entry of options.entries) {
 			const code = entry.code.toUpperCase();
 			if (options.signal.stop) {
@@ -1460,123 +1598,24 @@
 				break;
 			}
 			if (undoRedo.knownRecordCodes.includes(code)) {
-				const row = {
+				recordRow({
 					code,
 					label: entry.label,
 					status: "skipped-known",
 					message: "مسجّل بالفعل",
 					at: Date.now()
-				};
-				rows.push(row);
-				skipped++;
-				options.onRow(row);
-				continue;
-			}
-			if (paymentMode === "school") {
-				const lessonId = options.lessonId ?? currentLessonIdFromPage() ?? "";
-				if (!lessonId) {
-					const row = {
-						code,
-						label: entry.label,
-						status: "error",
-						message: "رقم الحصة غير معروف.",
-						at: Date.now()
-					};
-					rows.push(row);
-					failed++;
-					options.onRow(row);
-					stopped = true;
-					break;
-				}
-				const override = overrideMap.get(code);
-				const wait = waitForCode(code, timeoutMs);
-				const result = await submitSchoolAttendance(code, lessonId, override);
-				if (!result.ok) {
-					const row = {
-						code,
-						label: entry.label,
-						status: "error",
-						message: result.message,
-						at: Date.now()
-					};
-					rows.push(row);
-					failed++;
-					options.onRow(row);
-					if (!result.message.includes("مسجّل") && !result.message.includes("سبق")) {
-						stopped = true;
-						break;
-					}
-					continue;
-				}
-				const event = await wait;
-				if (event === "timeout") {
-					const row = {
-						code,
-						label: entry.label,
-						status: "created",
-						message: "تم التسجيل (تأكيد المراقب لم يصل)",
-						at: Date.now()
-					};
-					rows.push(row);
-					created++;
-					options.onRow(row);
-				} else if (event.type === "add") {
-					const payLabel = override ? {
-						paid: "كامل",
-						partial: "جزئي",
-						discounted: "مخفض",
-						forgotten: "نسي الفلوس"
-					}[override.status] : "كامل";
-					const row = {
-						code,
-						label: entry.label,
-						status: "created",
-						message: `تم التسجيل — ${payLabel}`,
-						recordId: event.record.id,
-						at: Date.now()
-					};
-					rows.push(row);
-					created++;
-					options.onRow(row);
-				} else if (event.type === "duplicate") {
-					const row = {
-						code,
-						label: entry.label,
-						status: "duplicate",
-						message: "مسجّل بالفعل",
-						recordId: event.record.id,
-						at: Date.now()
-					};
-					rows.push(row);
-					duplicates++;
-					options.onRow(row);
-				} else {
-					const row = {
-						code,
-						label: entry.label,
-						status: "error",
-						message: "استجابة غير متوقعة",
-						at: Date.now()
-					};
-					rows.push(row);
-					failed++;
-					options.onRow(row);
-				}
-				if (!options.signal.stop) await sleep(150);
+				});
 				continue;
 			}
 			const scan = detectScanForm();
 			if (!scan) {
-				const row = {
+				recordRow({
 					code,
 					label: entry.label,
 					status: "error",
 					message: "تعذّر العثور على نموذج/حقل الإدخال",
 					at: Date.now()
-				};
-				rows.push(row);
-				failed++;
-				options.onRow(row);
+				});
 				stopped = true;
 				break;
 			}
@@ -1585,56 +1624,40 @@
 			submitScanForm(scan.form, scan.input);
 			const result = await wait;
 			if (result === "timeout") {
-				const row = {
+				recordRow({
 					code,
 					label: entry.label,
 					status: "timeout",
 					message: "لم يصل تأكيد من الخادم",
 					at: Date.now()
-				};
-				rows.push(row);
-				failed++;
-				options.onRow(row);
+				});
 				stopped = true;
 				break;
 			}
-			if (result.type === "add") {
-				const row = {
-					code,
-					label: entry.label,
-					status: "created",
-					message: "تم التسجيل",
-					recordId: result.record.id,
-					at: Date.now()
-				};
-				rows.push(row);
-				created++;
-				options.onRow(row);
-			} else if (result.type === "duplicate") {
-				const row = {
-					code,
-					label: entry.label,
-					status: "duplicate",
-					message: "مسجّل بالفعل",
-					recordId: result.record.id,
-					at: Date.now()
-				};
-				rows.push(row);
-				duplicates++;
-				options.onRow(row);
-			} else {
-				const row = {
-					code,
-					label: entry.label,
-					status: "error",
-					message: "استجابة غير متوقعة",
-					at: Date.now()
-				};
-				rows.push(row);
-				failed++;
-				options.onRow(row);
-			}
-			if (!options.signal.stop) await sleep(150);
+			if (result.type === "add") recordRow({
+				code,
+				label: entry.label,
+				status: "created",
+				message: "تم التسجيل",
+				recordId: result.record.id,
+				at: Date.now()
+			});
+			else if (result.type === "duplicate") recordRow({
+				code,
+				label: entry.label,
+				status: "duplicate",
+				message: "مسجّل بالفعل",
+				recordId: result.record.id,
+				at: Date.now()
+			});
+			else recordRow({
+				code,
+				label: entry.label,
+				status: "error",
+				message: "استجابة غير متوقعة",
+				at: Date.now()
+			});
+			if (!options.signal.stop) await sleep(20);
 		}
 		if (options.signal.stop && !stopped) stopped = true;
 		return {
@@ -2179,12 +2202,21 @@
 			render();
 		});
 		featureList.addEventListener("click", (event) => {
-			const btn = event.target.closest("[data-feature-toggle], [data-undo], [data-redo]");
+			const btn = event.target.closest("[data-feature-toggle], [data-undo], [data-redo], [data-feature-id]");
 			if (!btn || btn.disabled) return;
 			event.stopPropagation();
 			if (btn.hasAttribute("data-feature-toggle")) undoRedo.setEnabled(!undoRedo.enabled);
 			else if (btn.hasAttribute("data-undo")) undoRedo.undo();
-			else undoRedo.redo();
+			else if (btn.hasAttribute("data-redo")) undoRedo.redo();
+			else if (btn.hasAttribute("data-feature-id")) {
+				const featureId = btn.dataset.featureId;
+				const storageKey = `tamperina_${featureId}`;
+				const newState = !(localStorage.getItem(storageKey) === "true");
+				localStorage.setItem(storageKey, String(newState));
+				btn.setAttribute("aria-checked", String(newState));
+				if (featureId === "center-modal") document.documentElement.classList.toggle("centered-payment-modal", newState);
+				else if (featureId === "hide-barcode") document.documentElement.classList.toggle("barcode-hidden", newState);
+			}
 		});
 		document.addEventListener("keydown", (event) => {
 			if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.altKey) {
