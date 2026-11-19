@@ -281,6 +281,12 @@
   display: grid;
   place-items: center;
   padding: 16px;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+
+.backdrop.open {
+  opacity: 1;
 }
 
 .modal {
@@ -295,6 +301,14 @@
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 28px var(--accent-glow);
   border: 1px solid var(--border-60);
   direction: rtl;
+  opacity: 0;
+  transform: translateY(10px) scale(0.985);
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.backdrop.open .modal {
+  opacity: 1;
+  transform: translateY(0) scale(1);
 }
 
 .modal-head {
@@ -340,6 +354,7 @@
 
 /* Segmented tabs, same shape as CTZ's sticker picker. */
 .tabs {
+  position: relative;
   display: flex;
   gap: 3px;
   margin: 6px 16px 0;
@@ -347,9 +362,24 @@
   border-radius: 10px;
   border: 1px solid var(--border-60);
   background: rgba(51, 36, 26, 0.4);
+  isolation: isolate;
+}
+
+.tab-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 12px var(--accent-glow), 0 0 22px rgba(242, 206, 170, 0.2), 0 2px 8px rgba(0, 0, 0, 0.24);
+  transition: transform 0.25s ease, width 0.25s ease, height 0.25s ease;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .tab {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex: 1;
   align-items: center;
@@ -364,7 +394,7 @@
   font-size: 11px;
   font-weight: 800;
   cursor: pointer;
-  transition: color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease, font-size 0.25s ease, font-weight 0.25s ease;
+  transition: color 0.25s ease, font-size 0.25s ease, font-weight 0.25s ease;
 }
 
 .tab svg {
@@ -378,11 +408,9 @@
 }
 
 .tab.active {
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #000;
   font-size: 13px;
   font-weight: 900;
-  box-shadow: 0 0 12px var(--accent-glow), 0 0 22px rgba(242, 206, 170, 0.2), 0 2px 8px rgba(0, 0, 0, 0.24);
 }
 
 .panels {
@@ -840,7 +868,12 @@
   .pill,
   .launcher,
   .mascot,
-  .toast {
+  .toast,
+  .backdrop,
+  .modal,
+  .tab,
+  .tab-indicator,
+  .tab svg {
     transition: none;
   }
 }
@@ -1433,4 +1466,90 @@
 .bulk-resolve-group {
   display: grid;
   gap: 10px;
+}
+
+/* --- evaluation find bar (Ctrl+Alt+F) --------------------------------------- */
+.find-bar {
+  position: fixed;
+  inset-inline: 12px;
+  bottom: 12px;
+  z-index: 90;
+  direction: rtl;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-alpha);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5), 0 0 18px var(--accent-glow);
+}
+
+.find-bar[hidden] { display: none; }
+
+.find-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.find-bar__icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.find-bar__icon svg { width: 18px; height: 18px; }
+
+.find-bar__input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font: 600 13px/1.4 inherit;
+}
+
+.find-bar__input:focus {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.find-bar__count {
+  min-width: 46px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  direction: ltr;
+}
+
+.find-bar__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(255, 226, 198, 0.05);
+  color: var(--text);
+  font: 700 11px/1 inherit;
+  cursor: pointer;
+}
+
+.find-bar__btn svg { width: 15px; height: 15px; }
+
+.find-bar__btn:hover:not(:disabled) {
+  background: rgba(242, 206, 170, 0.16);
+  color: var(--accent);
+}
+
+.find-bar__btn:disabled { opacity: 0.4; cursor: default; }
+
+.find-bar__btn[aria-pressed='true'] {
+  border-color: var(--accent-2);
+  color: var(--accent-ink);
+  background: var(--accent);
 }

@@ -6,6 +6,19 @@ import { icons } from '../icons'
 import { attachToaster, toast } from './toast'
 import { getUndoRedoController, type UndoRedoController } from './undoRedo'
 import {
+  commitExamTyping,
+  featureStateSignature as evaluationFeatureStateSignature,
+  getSelectedRow,
+  handleSelectedRowKey,
+  isEvaluationFeatureId,
+  isEvaluationPage,
+  isFeatureEnabled,
+  selectRow,
+  setFeatureEnabled,
+  subscribeFeatures,
+} from './evaluation'
+import { mountFindBar } from './findBar'
+import {
   currentLessonIdFromPage,
   detectScanForm,
   formatCandidate,
@@ -206,6 +219,7 @@ export function mountShell(): void {
         <button type="button" class="icon-btn" data-close title="إغلاق">${icons.close}</button>
       </div>
       <div class="tabs" role="tablist">
+        <span class="tab-indicator" aria-hidden="true"></span>
         <button type="button" class="tab" data-tab="toggles" role="tab">${icons.toggles} المفاتيح</button>
         <button type="button" class="tab" data-tab="bulk" role="tab">${icons.bulk} الجماعي</button>
       </div>
@@ -327,6 +341,8 @@ export function mountShell(): void {
   const frames = shellEl.querySelector<HTMLElement>('.frames')!
   const pin = shellEl.querySelector<HTMLButtonElement>('.pin')!
   const closeBtn = backdrop.querySelector<HTMLButtonElement>('[data-close]')!
+  const tabsBar = backdrop.querySelector<HTMLElement>('.tabs')!
+  const tabIndicator = backdrop.querySelector<HTMLElement>('.tab-indicator')!
   const tabButtons = Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-tab]'))
   const panels = Array.from(backdrop.querySelectorAll<HTMLElement>('[data-panel]'))
   const pillButtons = Array.from(pill.querySelectorAll<HTMLButtonElement>('[data-act]'))
@@ -506,6 +522,12 @@ export function mountShell(): void {
     for (const tab of tabButtons) {
       tab.classList.toggle('active', tab.dataset.tab === state.activeTab)
     }
+    const activeTab = tabButtons.find((tab) => tab.dataset.tab === state.activeTab) ?? tabButtons[0]
+    if (activeTab && tabIndicator) {
+      tabIndicator.style.width = `${activeTab.offsetWidth}px`
+      tabIndicator.style.height = `${activeTab.offsetHeight}px`
+      tabIndicator.style.transform = `translate(${activeTab.offsetLeft}px, ${activeTab.offsetTop}px)`
+    }
     for (const panel of panels) {
       panel.hidden = panel.dataset.panel !== state.activeTab
     }
@@ -513,19 +535,38 @@ export function mountShell(): void {
     renderFeatureIfNeeded()
   }
 
+  function isModalOpen(): boolean {
+    return backdrop.classList.contains('open')
+  }
+
+  let closeTimer: number | undefined
   function openModal(): void {
+    if (closeTimer) {
+      window.clearTimeout(closeTimer)
+      closeTimer = undefined
+    }
     backdrop.hidden = false
-    closeBtn.focus()
+    requestAnimationFrame(() => {
+      backdrop.classList.add('open')
+      render()
+      closeBtn.focus()
+    })
   }
 
   function closeModal(): void {
-    backdrop.hidden = true
+    if (!isModalOpen() && backdrop.hidden) return
+    backdrop.classList.remove('open')
+    if (closeTimer) window.clearTimeout(closeTimer)
+    closeTimer = window.setTimeout(() => {
+      backdrop.hidden = true
+      closeTimer = undefined
+    }, 240)
     launcher.focus()
   }
 
   function toggleModal(): void {
-    if (backdrop.hidden) openModal()
-    else closeModal()
+    if (isModalOpen()) closeModal()
+    else openModal()
   }
 
   function resizeBy(delta: number): void {
@@ -691,7 +732,7 @@ export function mountShell(): void {
       }
     }
 
-    if (event.key === 'Escape' && !backdrop.hidden) {
+    if (event.key === 'Escape' && isModalOpen()) {
       closeModal()
       return
     }
