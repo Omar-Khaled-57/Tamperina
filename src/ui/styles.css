@@ -838,6 +838,13 @@
 }
 
 /* ---- bulk attendance (M2) ----------------------------------------------- */
+/* Center payment modal toggle */
+.centered-payment-modal .modal,
+.centered-payment-modal dialog {
+  inset: 50% auto auto 50% !important;
+  transform: translate(-50%, -50%) !important;
+  margin: 0 auto;
+}
 .bulk-menu-list {
   display: grid;
   gap: 10px;
@@ -1192,4 +1199,155 @@
 
 .bulk-inline-edit input {
   flex: 1;
+}
+
+/* ---- bulk payment mode + table (school) --------------------------------- */
+.bulk-mode-toggle {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bulk-mode-btn {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 226, 198, 0.04);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.bulk-mode-btn:hover {
+  color: var(--text);
+  border-color: rgba(242, 206, 170, 0.3);
+}
+
+.bulk-mode-btn.active {
+  color: var(--accent-ink);
+  background: linear-gradient(135deg, rgba(242, 206, 170, 0.95), rgba(217, 166, 124, 0.95));
+  border-color: rgba(242, 206, 170, 0.5);
+}
+
+.bulk-pay-section {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 226, 198, 0.03);
+}
+
+.bulk-pay-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bulk-pay-head strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.bulk-pay-search-wrap {
+  flex: 1;
+  min-width: 160px;
+  max-width: 260px;
+}
+
+.bulk-pay-search {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 226, 198, 0.04);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 7px 9px;
+  outline: none;
+}
+
+.bulk-pay-search:focus {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.bulk-pay-table {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
+  padding-inline-end: 2px;
+}
+
+.bulk-pay-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-60);
+  border-radius: 10px;
+  background: rgba(255, 226, 198, 0.03);
+}
+
+.bulk-pay-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.bulk-pay-label small {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  direction: ltr;
+}
+
+.bulk-pay-select,
+.bulk-pay-amount {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 226, 198, 0.05);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.bulk-pay-select:focus,
+.bulk-pay-amount:focus {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.bulk-pay-select {
+  min-width: 110px;
+}
+
+.bulk-pay-amount {
+  width: 92px;
+  direction: ltr;
+}
+
+.bulk-pay-amount[hidden] {
+  display: none;
+}
+
+.bulk-pay-empty {
+  padding: 10px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 11px;
 }

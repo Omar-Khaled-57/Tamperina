@@ -2,6 +2,16 @@ import { getUndoRedoController } from './undoRedo'
 
 const CODE_RE = /^[A-Z0-9_-]{3,80}$/
 
+export type PaymentMode = 'center' | 'school'
+export type PaymentStatus = 'paid' | 'partial' | 'discounted' | 'forgotten'
+
+export interface PaymentOverride {
+  studentCode: string   // uppercase, matches the entry code
+  status: PaymentStatus
+  amountPaid?: number   // required for partial / discounted
+  note?: string
+}
+
 export interface StudentCandidate {
   id: string
   name: string
@@ -376,14 +386,74 @@ function submitScanForm(form: HTMLFormElement, input: HTMLInputElement): void {
   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
 }
 
+/** Returns the CSRF token from the page meta tag (same-origin, safe). */
+function getCsrfToken(): string {
+  return (document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? '').trim()
+}
+
+/**
+ * School-mode: POST directly to /attendance with payment body for each student.
+ * This bypasses the scan form + payment dialog entirely, which is what we want
+ * when we've already collected payment info in the bulk UI.
+ */
+async function submitSchoolAttendance(
+  code: string,
+  lessonId: string,
+  override: PaymentOverride | undefined,
+): Promise<{ ok: true, data: Record<string, unknown> } | { ok: false, message: string }> {
+  const csrf = getCsrfToken()
+  if (!csrf) return { ok: false, message: 'تعذّر قراءة CSRF token من الصفحة.' }
+
+  const status = override?.status ?? 'paid'
+  const body: Record<string, unknown> = {
+    student: code,
+    lesson_id: Number(lessonId),
+    source: 'manual',
+    payment_status: status,
+  }
+  if ((status === 'partial' || status === 'discounted') && override?.amountPaid != null) {
+    body.amount_paid = override.amountPaid
+  }
+  if (override?.note) body.payment_note = override.note
+
+  try {
+    const response = await fetch('/attendance', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-CSRF-TOKEN': csrf,
+      },
+      body: JSON.stringify(body),
+    })
+    const data = await response.json() as Record<string, unknown>
+    if (!response.ok) {
+      const errors = data.errors as Record<string, string[]> | undefined
+      const msg = String(data.message ?? (errors ? Object.values(errors).flat()[0] : '') ?? 'خطأ غير معروف')
+      return { ok: false, message: msg }
+    }
+    return { ok: true, data }
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'تعذّر الاتصال بالخادم.' }
+  }
+}
+
 export async function runBulkAttendance(options: {
   entries: Array<{ code: string, label?: string }>
   signal: { stop: boolean }
   onRow: (row: BulkRowResult) => void
   timeoutMs?: number
+  paymentMode?: PaymentMode
+  paymentOverrides?: PaymentOverride[]
+  lessonId?: string
 }): Promise<BulkRunSummary> {
   const undoRedo = getUndoRedoController()
   const timeoutMs = options.timeoutMs ?? 10000
+  const paymentMode = options.paymentMode ?? 'center'
+  const overrideMap = new Map<string, PaymentOverride>(
+    (options.paymentOverrides ?? []).map((o) => [o.studentCode.toUpperCase(), o]),
+  )
   const rows: BulkRowResult[] = []
   let created = 0
   let duplicates = 0
@@ -412,6 +482,49 @@ export async function runBulkAttendance(options: {
       continue
     }
 
+    // ---- مدرسة (school) mode: direct fetch, no form/dialog interaction --------
+    if (paymentMode === 'school') {
+      const lessonId = options.lessonId ?? currentLessonIdFromPage() ?? ''
+      if (!lessonId) {
+        const row: BulkRowResult = { code, label: entry.label, status: 'error', message: 'رقم الحصة غير معروف.', at: Date.now() }
+        rows.push(row); failed++; options.onRow(row); stopped = true; break
+      }
+      const override = overrideMap.get(code)
+      const wait = waitForCode(code, timeoutMs)
+      const result = await submitSchoolAttendance(code, lessonId, override)
+      if (!result.ok) {
+        // No attendance event will fire — cancel the wait
+        const row: BulkRowResult = { code, label: entry.label, status: 'error', message: result.message, at: Date.now() }
+        rows.push(row); failed++; options.onRow(row)
+        // If it's a server error (not a duplicate/validation), stop
+        if (!result.message.includes('مسجّل') && !result.message.includes('سبق')) { stopped = true; break }
+        continue
+      }
+      // Wait for the undoRedo observer to confirm the attendance event
+      const event = await wait
+      if (event === 'timeout') {
+        // The POST succeeded but the event didn't come — still count as created
+        // (the undoRedo observer may not have caught it, but the record is there)
+        const row: BulkRowResult = { code, label: entry.label, status: 'created', message: 'تم التسجيل (تأكيد المراقب لم يصل)', at: Date.now() }
+        rows.push(row); created++; options.onRow(row)
+      } else if (event.type === 'add') {
+        const payLabel = override ? {
+          paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي الفلوس',
+        }[override.status] : 'كامل'
+        const row: BulkRowResult = { code, label: entry.label, status: 'created', message: `تم التسجيل — ${payLabel}`, recordId: event.record.id, at: Date.now() }
+        rows.push(row); created++; options.onRow(row)
+      } else if (event.type === 'duplicate') {
+        const row: BulkRowResult = { code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: event.record.id, at: Date.now() }
+        rows.push(row); duplicates++; options.onRow(row)
+      } else {
+        const row: BulkRowResult = { code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() }
+        rows.push(row); failed++; options.onRow(row)
+      }
+      if (!options.signal.stop) await sleep(150)
+      continue
+    }
+
+    // ---- سنتر (center) mode: use the scan form as before ---------------------
     const scan = detectScanForm()
     if (!scan) {
       const row: BulkRowResult = {

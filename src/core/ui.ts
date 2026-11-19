@@ -15,6 +15,9 @@ import {
   type BulkRowResult,
   type NameRow,
   type ParseEntriesResult,
+  type PaymentMode,
+  type PaymentStatus,
+  type PaymentOverride,
 } from './bulkAttendance'
 import {
   loadShell,
@@ -217,6 +220,13 @@ export function mountShell(): void {
                   <span>رقم الحصة (الحالية افتراضيًا)</span>
                   <input type="text" inputmode="numeric" class="bulk-input" data-bulk-lesson placeholder="مثال: 293" />
                 </label>
+                <div class="bulk-field">
+                  <span>نوع الحصة</span>
+                  <div class="bulk-mode-toggle" data-bulk-mode-toggle role="group" aria-label="نوع الحصة">
+                    <button type="button" class="bulk-mode-btn active" data-mode="center" aria-pressed="true">🏢 سنتر</button>
+                    <button type="button" class="bulk-mode-btn" data-mode="school" aria-pressed="false">🏫 مدرسة</button>
+                  </div>
+                </div>
               </div>
 
               <label class="bulk-field">
@@ -233,6 +243,16 @@ export function mountShell(): void {
 
               <div class="bulk-preview" data-bulk-preview-box>لم تتم المعاينة بعد.</div>
               <div class="bulk-resolve" data-bulk-resolve hidden></div>
+
+              <div class="bulk-pay-section" data-bulk-pay-section hidden>
+                <div class="bulk-pay-head">
+                  <strong>💳 جدول المدفوعات — مدرسة</strong>
+                  <div class="bulk-pay-search-wrap">
+                    <input type="search" class="bulk-pay-search" data-bulk-pay-search placeholder="ابحث بالاسم أو الكود…" autocomplete="off" />
+                  </div>
+                </div>
+                <div class="bulk-pay-table" data-bulk-pay-table></div>
+              </div>
 
               <div class="history-head">
                 ${icons.history}
@@ -612,6 +632,10 @@ export function mountShell(): void {
   const bulkLog = bulkRoot.querySelector<HTMLElement>('[data-bulk-log]')!
   const bulkLogCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-log-count]')!
   const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
+  const bulkModeBtns = Array.from(bulkRoot.querySelectorAll<HTMLButtonElement>('[data-bulk-mode-toggle] [data-mode]'))
+  const bulkPaySection = bulkRoot.querySelector<HTMLElement>('[data-bulk-pay-section]')!
+  const bulkPayTable = bulkRoot.querySelector<HTMLElement>('[data-bulk-pay-table]')!
+  const bulkPaySearch = bulkRoot.querySelector<HTMLInputElement>('[data-bulk-pay-search]')!
 
   let bulkParsed: ParseEntriesResult | null = null
   let bulkNameRows: NameRow[] = []
@@ -622,9 +646,88 @@ export function mountShell(): void {
   let bulkLessonTouched = false
   let bulkLogRows: BulkRowResult[] = []
   let bulkAnalysisToken = 0
+  let bulkPayMode: PaymentMode = 'center'
+  // Map: uppercase code → override (for school mode)
+  const bulkPayOverrides = new Map<string, PaymentOverride>()
 
   function bulkSupported(): boolean {
     return isAttendancePage()
+  }
+
+  /** Detect center vs school from the scan form data attribute. */
+  function detectPagePaymentMode(): PaymentMode {
+    const form = document.getElementById('scanForm') as HTMLFormElement | null
+    if (!form) return 'center'
+    return form.dataset.voiceCenterLesson === '1' ? 'center' : 'school'
+  }
+
+  /** Apply a payment mode and update toggle UI. */
+  function applyPaymentMode(mode: PaymentMode): void {
+    bulkPayMode = mode
+    for (const btn of bulkModeBtns) {
+      const active = btn.dataset.mode === mode
+      btn.classList.toggle('active', active)
+      btn.setAttribute('aria-pressed', String(active))
+    }
+  }
+
+  /** Build / rebuild the payment override table rows for school mode. */
+  function renderPayTable(filterQuery = ''): void {
+    if (bulkPayMode !== 'school') {
+      bulkPaySection.hidden = true
+      return
+    }
+    // Collect all resolved entries (codes + resolved names)
+    const allEntries: Array<{ code: string; label: string }> = []
+    if (bulkParsed) {
+      for (const item of bulkParsed.codes) allEntries.push({ code: item.code, label: item.raw })
+      for (const row of bulkNameRows) {
+        if (row.status === 'resolved' && row.code) {
+          allEntries.push({ code: row.code.toUpperCase(), label: row.studentName ?? row.query })
+        }
+      }
+    }
+    if (!allEntries.length) {
+      bulkPaySection.hidden = true
+      return
+    }
+    bulkPaySection.hidden = false
+
+    const nq = filterQuery.trim().toLowerCase()
+    const statusOptions: Array<{ value: PaymentStatus; label: string }> = [
+      { value: 'paid',       label: 'كامل' },
+      { value: 'partial',    label: 'جزئي' },
+      { value: 'discounted', label: 'مخفض' },
+      { value: 'forgotten',  label: 'نسي الفلوس' },
+    ]
+
+    const rows = allEntries.filter(({ code, label }) => {
+      if (!nq) return true
+      return code.toLowerCase().includes(nq) || label.toLowerCase().includes(nq)
+    })
+
+    if (!rows.length) {
+      bulkPayTable.innerHTML = `<div class="bulk-pay-empty">لا توجد نتائج للبحث.</div>`
+      return
+    }
+
+    bulkPayTable.innerHTML = rows.map(({ code, label }) => {
+      const override = bulkPayOverrides.get(code)
+      const status = override?.status ?? 'paid'
+      const amountPaid = override?.amountPaid ?? ''
+      const needsAmount = status === 'partial' || status === 'discounted'
+      const selectOpts = statusOptions.map((o) =>
+        `<option value="${o.value}"${o.value === status ? ' selected' : ''}>${o.label}</option>`
+      ).join('')
+      return `<div class="bulk-pay-row" data-pay-code="${escapeBulk(code)}">
+        <span class="bulk-pay-label" title="${escapeBulk(code)}">${escapeBulk(label)}<small>${escapeBulk(code)}</small></span>
+        <select class="bulk-pay-select" data-pay-status="${escapeBulk(code)}">${selectOpts}</select>
+        <input type="number" class="bulk-pay-amount" data-pay-amount="${escapeBulk(code)}"
+          placeholder="المبلغ" min="0" step="0.01"
+          value="${escapeBulk(String(amountPaid))}"
+          ${needsAmount ? '' : 'hidden'} />
+      </div>`
+    }).join('')
   }
 
   function setBulkBadge(text: string, className: string): void {
@@ -863,6 +966,7 @@ export function mountShell(): void {
   function renderBulkAnalysis(): void {
     renderBulkAnalysisSummary()
     renderBulkResolve()
+    renderPayTable(bulkPaySearch?.value ?? '')
     updateBulkButtons()
   }
 
@@ -873,6 +977,8 @@ export function mountShell(): void {
     bulkParsed = null
     bulkNameRows = []
     bulkArmed = false
+    bulkPayOverrides.clear()
+    bulkPaySection.hidden = true
     bulkPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة والتحليل قبل التنفيذ.'
     bulkResolveBox.hidden = true
     bulkResolveBox.innerHTML = ''
@@ -966,12 +1072,32 @@ export function mountShell(): void {
       return
     }
 
+    if (bulkPayMode === 'school') {
+      const missingAmount = Array.from(bulkPayOverrides.values()).find(
+        (o) => (o.status === 'partial' || o.status === 'discounted') && (o.amountPaid == null || Number.isNaN(o.amountPaid)),
+      )
+      if (missingAmount) {
+        toast({
+          title: 'مبلغ غير مكتمل',
+          description: `أدخل المبلغ المدفوع للحالات الجزئية/المخفضة (كود ${missingAmount.studentCode}).`,
+          variant: 'warning',
+        })
+        return
+      }
+    }
+
     const entries = executableEntries()
     if (!entries.length) return
     if (!undoRedo.enabled) {
       toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء والتراجع معطل.', variant: 'warning' })
       return
     }
+
+    // Collect payment overrides for school mode
+    const paymentOverrides: PaymentOverride[] = bulkPayMode === 'school'
+      ? Array.from(bulkPayOverrides.values())
+      : []
+    const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
 
     bulkRunning = true
     bulkStop = { stop: false }
@@ -986,6 +1112,9 @@ export function mountShell(): void {
         entries,
         signal: bulkStop,
         onRow: appendBulkRow,
+        paymentMode: bulkPayMode,
+        paymentOverrides,
+        lessonId,
       })
 
       const committed = undoRedo.commitBatch({
@@ -1068,6 +1197,67 @@ export function mountShell(): void {
   bulkCodesInput.addEventListener('input', invalidateBulkAnalysis)
   bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkAnalysis() })
 
+  // ---- mode toggle ---------------------------------------------------------
+  for (const btn of bulkModeBtns) {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.mode as PaymentMode
+      if (mode === bulkPayMode) return
+      applyPaymentMode(mode)
+      bulkArmed = false
+      bulkPayOverrides.clear()
+      // Preserve analysis/resolution; just re-render to show/hide payment table.
+      if (bulkParsed) {
+        renderBulkAnalysis()
+      } else {
+        bulkPaySection.hidden = true
+        updateBulkButtons()
+      }
+    })
+  }
+
+  // ---- payment table interaction -------------------------------------------
+  bulkPaySearch.addEventListener('input', () => renderPayTable(bulkPaySearch.value))
+
+  bulkPayTable.addEventListener('change', (event) => {
+    const target = event.target as HTMLElement
+    // Status select changed
+    const statusEl = target.closest<HTMLSelectElement>('[data-pay-status]')
+    if (statusEl) {
+      const code = statusEl.dataset.payStatus!.toUpperCase()
+      const newStatus = statusEl.value as PaymentStatus
+      const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'paid' }
+      existing.status = newStatus
+      bulkPayOverrides.set(code, existing)
+      // Show/hide amount field in this row
+      const row = statusEl.closest<HTMLElement>('[data-pay-code]')
+      const amountInput = row?.querySelector<HTMLInputElement>('[data-pay-amount]')
+      if (amountInput) {
+        const needsAmount = newStatus === 'partial' || newStatus === 'discounted'
+        amountInput.hidden = !needsAmount
+        if (needsAmount) amountInput.focus()
+        // If the status went back to paid/forgotten, clear amount
+        if (!needsAmount) {
+          amountInput.value = ''
+          delete existing.amountPaid
+        }
+      }
+      bulkArmed = false
+      updateBulkButtons()
+      return
+    }
+    // Amount input changed
+    const amountEl = target.closest<HTMLInputElement>('[data-pay-amount]')
+    if (amountEl) {
+      const code = amountEl.dataset.payAmount!.toUpperCase()
+      const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'partial' }
+      const val = parseFloat(amountEl.value)
+      existing.amountPaid = isNaN(val) ? undefined : val
+      bulkPayOverrides.set(code, existing)
+      bulkArmed = false
+      updateBulkButtons()
+    }
+  })
+
   bulkResolveBox.addEventListener('click', (event) => {
     const btn = (event.target as Element).closest<HTMLButtonElement>('[data-resolve-action]')
     if (!btn) return
@@ -1124,6 +1314,8 @@ export function mountShell(): void {
 
   // Prefill lesson and keep bulk controls in sync with undoRedo state.
   refreshBulkLesson()
+  // Auto-detect mode from the page
+  applyPaymentMode(detectPagePaymentMode())
   renderBulkAnalysis()
   undoRedo.subscribe(() => {
     refreshBulkLesson()
