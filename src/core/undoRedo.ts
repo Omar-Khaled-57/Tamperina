@@ -9,7 +9,7 @@ import { toast } from './toast'
  * previously saved values, so no server-specific endpoint needs to be hardcoded.
  */
 
-type HttpMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 interface HttpCommand {
   method: HttpMethod
@@ -117,6 +117,8 @@ export interface UndoRedoController {
   readonly canRedo: boolean
   readonly history: readonly HistoryAction[]
   readonly knownRecordCodes: readonly string[]
+  /** Codes already recorded for one specific lesson (records without a lesson are included). */
+  knownRecordCodesForLesson(lessonId: string): string[]
   /** Cached attendance records for export (id, student code, name, lesson). */
   readonly attendanceRecords: readonly LiveRecord[]
   readonly lessonId: string | null
@@ -127,6 +129,10 @@ export interface UndoRedoController {
   commitBatch(options?: { title?: string, detail?: string }): HistoryAction | null
   /** Record an attendance add explicitly; deduplicated against the network observer. */
   ensureAttendanceRecorded(record: LiveRecord, headers?: Record<string, string>): void
+  /** Load the attendance records currently stored for a lesson. */
+  refreshAttendanceLesson(lessonId: string): Promise<LiveRecord[]>
+  /** Delete one attendance record and record the removal for undo/redo. */
+  deleteAttendanceRecord(record: LiveRecord, headers?: Record<string, string>): Promise<void>
   /** Capture the saved grade values before Tamperina changes a row's grade. */
   captureGradeBaseline(row: HTMLElement): void
   subscribe(listener: () => void): () => void
@@ -307,9 +313,11 @@ function idFrom(value: unknown): string | null {
 }
 
 function isDeleteSuccess(value: unknown): boolean {
+  // Many Laravel endpoints answer DELETE with 200/204 and no JSON body. The
+  // caller already checks the HTTP status, so only explicit false is failure.
   const obj = asObject(value)
-  if (!obj) return false
-  return obj.deleted === true || obj.success === true || obj.ok === true
+  if (!obj) return true
+  return obj.deleted !== false && obj.success !== false && obj.ok !== false
 }
 
 function studentCode(record: LiveRecord | null | undefined): string {
@@ -357,6 +365,11 @@ function normaliseLiveRecord(raw: unknown, fallback?: Partial<LiveRecord>): Live
     lessonId: lessonId == null ? null : lessonId,
     source,
   }
+}
+
+/** Build an undoable record snapshot from a POST /attendance response. */
+export function recordFromAttendanceResponse(raw: unknown, fallback: Partial<LiveRecord>): LiveRecord | null {
+  return normaliseLiveRecord(raw, fallback)
 }
 
 function labelFor(record: LiveRecord): string {
@@ -1342,6 +1355,52 @@ function createController(): UndoRedoController {
     pushAction(makeAddedAction(record, headers))
   }
 
+  /** Fetch the authoritative live list for a lesson and refresh our cache. */
+  async function refreshAttendanceLesson(lessonId: string): Promise<LiveRecord[]> {
+    const clean = String(lessonId || '').trim()
+    if (!clean) return []
+    const json = await send({ method: 'GET', url: absoluteUrl(`/attendance/live?lesson_id=${encodeURIComponent(clean)}`) })
+    const container = asObject(json)
+    const data = asObject(container?.data)
+    const list = container?.records ?? data?.records
+    const found: LiveRecord[] = []
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        const record = normaliseLiveRecord(item, { lessonId: clean })
+        if (!record) continue
+        const recordLesson = record.lessonId == null ? clean : String(record.lessonId)
+        if (recordLesson !== clean) continue
+        records.set(record.id, record)
+        found.push(record)
+      }
+    }
+    currentLessonId = clean
+    persist()
+    notify()
+    return found
+  }
+
+  function withCsrf(headers?: Record<string, string>): Record<string, string> | undefined {
+    const token = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content?.trim()
+    if (!token) return headers
+    return { ...(headers ?? {}), 'X-CSRF-TOKEN': token }
+  }
+
+  /**
+   * Delete via the native fetch so the observer cannot also record the removal,
+   * then record exactly one undoable action (or one entry in an open batch).
+   */
+  async function deleteAttendanceRecord(record: LiveRecord, headers?: Record<string, string>): Promise<void> {
+    if (!record?.id) throw new Error('معرّف سجل الحضور غير موجود')
+    const requestHeaders = withCsrf(headers)
+    const response = await send(deleteCommand(record.id, requestHeaders))
+    if (!isDeleteSuccess(response)) throw new Error('لم يؤكد الخادم حذف سجل الحضور')
+    forgetRecord(record.id)
+    recordedAttendanceIds.delete(record.id)
+    pushAction(makeRemovedAction(record, requestHeaders))
+    emitAttendance({ type: 'remove', record })
+  }
+
   return {
     version: CONTROLLER_VERSION,
     get supported() { return isSupportedPage() },
@@ -1361,6 +1420,17 @@ function createController(): UndoRedoController {
       return Array.from(codes)
     },
     get attendanceRecords() { return Array.from(records.values()) },
+    knownRecordCodesForLesson(lessonId: string) {
+      const clean = String(lessonId || '').trim()
+      const codes = new Set<string>()
+      for (const record of records.values()) {
+        const recordLesson = record.lessonId == null ? null : String(record.lessonId)
+        if (clean && recordLesson != null && recordLesson !== clean) continue
+        const code = studentCode(record)
+        if (code) codes.add(code.toUpperCase())
+      }
+      return Array.from(codes)
+    },
     get lessonId() { return currentLessonId },
     setEnabled(value: boolean) {
       if (enabled === value) return
@@ -1398,6 +1468,8 @@ function createController(): UndoRedoController {
       return grouped
     },
     ensureAttendanceRecorded,
+    refreshAttendanceLesson,
+    deleteAttendanceRecord,
     subscribe(listener: () => void) {
       listeners.add(listener)
       return () => listeners.delete(listener)

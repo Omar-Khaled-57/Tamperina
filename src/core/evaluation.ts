@@ -145,6 +145,8 @@ export function rowLabel(row: HTMLElement): string {
 // ---- toggles ----------------------------------------------------------------
 
 export function isFeatureEnabled(id: EvaluationFeatureId): boolean {
+  // Homework buttons are hidden for now — leave the page's native dropdown alone.
+  if (id === 'homework-buttons') return false
   try {
     const raw = localStorage.getItem(`tamperina_${id}`)
     return raw === null ? true : raw === 'true'

@@ -1146,6 +1146,32 @@
   white-space: nowrap;
 }
 
+.bulk-diagnostics {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid rgba(232, 162, 74, 0.25);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.bulk-debug-text {
+  margin: 10px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text-muted);
+  direction: ltr;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
 .bulk-run:not(:disabled) {
   border-color: rgba(242, 206, 170, 0.35);
 }
@@ -1553,6 +1579,11 @@
 }
 
 .bulk-walkin-row > span {
+  /* Match .bulk-resolve-name: without an explicit color this inherits the
+     host's initial (black) text color and disappears on the dark panel. */
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1589,6 +1620,13 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.7;
+}
+
+.bulk-remove-name {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 0;
 }
 
 /* --- evaluation find bar (Ctrl+Alt+F) --------------------------------------- */

@@ -1,5 +1,5 @@
 import { unsafeWindow } from '$'
-import { getUndoRedoController } from './undoRedo'
+import { getUndoRedoController, recordFromAttendanceResponse } from './undoRedo'
 
 const CODE_RE = /^[A-Z0-9_-]{3,80}$/
 
@@ -80,6 +80,14 @@ export interface ScanFormInfo {
 
 export type BulkRowStatus = 'created' | 'duplicate' | 'skipped-known' | 'timeout' | 'error' | 'stopped'
 
+/** Raw evidence for one student, kept so a failed run can be diagnosed exactly. */
+export interface BulkRowDebug {
+  request?: { path: string, payload: Record<string, unknown> }
+  response?: { status: number, statusText: string, contentType: string, body: string }
+  observer?: string
+  note?: string
+}
+
 export interface BulkRowResult {
   code: string
   label?: string
@@ -87,6 +95,17 @@ export interface BulkRowResult {
   message?: string
   recordId?: string
   at: number
+  debug?: BulkRowDebug
+}
+
+export interface BulkRunContext {
+  lessonId: string
+  paymentMode: PaymentMode
+  entries: number
+  csrfPresent: boolean
+  startedAt: number
+  finishedAt: number
+  href: string
 }
 
 export interface BulkRunSummary {
@@ -96,6 +115,7 @@ export interface BulkRunSummary {
   skipped: number
   failed: number
   stopped: boolean
+  context: BulkRunContext
 }
 
 function normalizeDigits(value: string): string {
@@ -474,7 +494,9 @@ function waitForCode(code: string, timeoutMs: number): CodeWait {
   off = undoRedo.onAttendance((event) => {
     if (done) return
     const recordCode = String(event.record.studentCode ?? event.record.username ?? '').toUpperCase()
-    if (recordCode && recordCode !== code.toUpperCase()) return
+    // Never let an event with no code satisfy every waiter — that would mark
+    // unrelated rows as created and hide the real failure.
+    if (!recordCode || recordCode !== code.toUpperCase()) return
     cleanup()
     resolveWait(event)
   })
@@ -515,13 +537,23 @@ function getCsrfToken(): string {
  * The request goes through the page's patched fetch so the shared undo/redo
  * observer records it and the batch stays reversible.
  */
+type SchoolSubmitResult =
+  | { ok: true, data: Record<string, unknown>, debug: BulkRowDebug }
+  | { ok: false, message: string, status?: number, debug: BulkRowDebug }
+
 async function submitSchoolAttendance(
   code: string,
   lessonId: string,
   override: PaymentOverride | undefined,
-): Promise<{ ok: true, data: Record<string, unknown> } | { ok: false, message: string, status?: number }> {
+): Promise<SchoolSubmitResult> {
   const csrf = getCsrfToken()
-  if (!csrf) return { ok: false, message: 'تعذّر قراءة CSRF token من الصفحة.' }
+  if (!csrf) {
+    return {
+      ok: false,
+      message: 'تعذّر قراءة CSRF token من الصفحة.',
+      debug: { note: 'meta[name="csrf-token"] missing or empty' },
+    }
+  }
 
   const body: Record<string, unknown> = {
     student: code,
@@ -536,6 +568,7 @@ async function submitSchoolAttendance(
     if (override.note) body.payment_note = override.note
   }
 
+  const debug: BulkRowDebug = { request: { path: '/attendance', payload: body } }
   try {
     const response = await pageFetch()('/attendance', {
       method: 'POST',
@@ -547,15 +580,46 @@ async function submitSchoolAttendance(
       },
       body: JSON.stringify(body),
     })
-    const data = await response.json() as Record<string, unknown>
+    // Read raw text so a non-JSON error page (419/302/500) is still captured.
+    const text = await response.text()
+    debug.response = {
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get('content-type') ?? '',
+      body: text.slice(0, 2000),
+    }
+
+    let data: Record<string, unknown> = {}
+    try {
+      const parsed: unknown = JSON.parse(text)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        data = parsed as Record<string, unknown>
+      } else {
+        debug.note = 'JSON response was not an object'
+      }
+    } catch {
+      debug.note = 'Response body was not JSON'
+    }
+
     if (!response.ok) {
       const errors = data.errors as Record<string, string[]> | undefined
-      const msg = String(data.message ?? (errors ? Object.values(errors).flat()[0] : '') ?? 'خطأ غير معروف')
-      return { ok: false, message: msg, status: response.status }
+      const fieldErrors = errors
+        ? Object.entries(errors).map(([field, messages]) => `${field}: ${(messages ?? []).join(' / ')}`).join('; ')
+        : ''
+      const msg = String(
+        fieldErrors || data.message || (typeof data.error === 'string' ? data.error : '')
+        || `HTTP ${response.status} ${response.statusText}`.trim(),
+      )
+      return { ok: false, message: msg, status: response.status, debug }
     }
-    return { ok: true, data }
+    return { ok: true, data, debug }
   } catch (err) {
-    return { ok: false, message: err instanceof Error ? err.message : 'تعذّر الاتصال بالخادم.' }
+    debug.note = `fetch threw: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : 'تعذّر الاتصال بالخادم.',
+      debug,
+    }
   }
 }
 
@@ -575,11 +639,22 @@ export async function runBulkAttendance(options: {
     (options.paymentOverrides ?? []).map((o) => [o.studentCode.toUpperCase(), o]),
   )
   const rows: BulkRowResult[] = []
+  const startedAt = Date.now()
   let created = 0
   let duplicates = 0
   let skipped = 0
   let failed = 0
   let stopped = false
+
+  const makeContext = (): BulkRunContext => ({
+    lessonId: options.lessonId ?? currentLessonIdFromPage() ?? '',
+    paymentMode,
+    entries: options.entries.length,
+    csrfPresent: !!getCsrfToken(),
+    startedAt,
+    finishedAt: Date.now(),
+    href: location.href,
+  })
 
   const recordRow = (row: BulkRowResult): void => {
     rows.push(row)
@@ -594,11 +669,20 @@ export async function runBulkAttendance(options: {
   if (paymentMode === 'school') {
     const lessonId = options.lessonId ?? currentLessonIdFromPage() ?? ''
     if (!lessonId) {
-      recordRow({ code: '', status: 'error', message: 'رقم الحصة غير معروف.', at: Date.now() })
-      return { rows, created, duplicates, skipped, failed, stopped: true }
+      recordRow({
+        code: '',
+        status: 'error',
+        message: 'رقم الحصة غير معروف.',
+        at: Date.now(),
+        debug: { note: 'No lesson id from options, page form, or URL' },
+      })
+      return { rows, created, duplicates, skipped, failed, stopped: true, context: makeContext() }
     }
 
-    const known = new Set(undoRedo.knownRecordCodes.map((c) => c.toUpperCase()))
+    // Only codes already recorded FOR THIS LESSON count as known. The cache is
+    // shared across navigation, so using all records made year-3 codes that
+    // also exist in year 1/2 look "already registered" and get skipped.
+    const known = new Set(undoRedo.knownRecordCodesForLesson(lessonId).map((c) => c.toUpperCase()))
     const toRun: Array<{ code: string, label?: string }> = []
     const queued = new Set<string>()
     for (const entry of options.entries) {
@@ -622,8 +706,115 @@ export async function runBulkAttendance(options: {
     const duplicateMessage = (message: string): boolean =>
       /مسجّ?ل|سبق|موجود|مكرر|duplicate|already/i.test(message)
 
-    const concurrency = 10
+    // A burst of 10 parallel POSTs can trip platform throttling; five workers
+    // with a small pause keeps bulk runs reliable on large lessons.
+    const concurrency = 5
     let index = 0
+
+    const payLabelFor = (override: PaymentOverride | undefined): string => override ? {
+      paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي/مؤجل',
+    }[override.status] : 'افتراضي الحصة'
+
+    const processEntry = async (entry: { code: string, label?: string }): Promise<void> => {
+      const code = entry.code.toUpperCase()
+      const override = overrideMap.get(code)
+      const wait = waitForCode(code, timeoutMs)
+      const result = await submitSchoolAttendance(code, lessonId, override)
+
+      if (!result.ok) {
+        wait.cancel()
+        const duplicate = duplicateMessage(result.message)
+        recordRow({
+          code,
+          label: entry.label,
+          status: duplicate ? 'duplicate' : 'error',
+          message: result.message,
+          at: Date.now(),
+          debug: {
+            ...result.debug,
+            observer: 'not-watched',
+            note: duplicate
+              ? `${result.debug.note ?? ''} Classified as duplicate from server message.`.trim()
+              : result.debug.note,
+          },
+        })
+        return
+      }
+
+      // Prefer the observer event (it has the full snapshot), but fall back to
+      // the POST response if the observer is late or missing.
+      const event = await Promise.race([
+        wait.promise,
+        sleep(Math.min(timeoutMs, 1200)).then(() => 'timeout' as const),
+      ])
+      wait.cancel()
+      const debug: BulkRowDebug = {
+        ...result.debug,
+        observer: event === 'timeout' ? 'timeout' : event.type,
+      }
+
+      if (event !== 'timeout' && event.type === 'add') {
+        undoRedo.ensureAttendanceRecorded(event.record)
+        recordRow({
+          code,
+          label: entry.label,
+          status: 'created',
+          message: `تم التسجيل — ${payLabelFor(override)}`,
+          recordId: event.record.id,
+          at: Date.now(),
+          debug,
+        })
+        return
+      }
+      if (event !== 'timeout' && event.type === 'duplicate') {
+        recordRow({
+          code,
+          label: entry.label,
+          status: 'duplicate',
+          message: 'مسجّل بالفعل',
+          recordId: event.record.id,
+          at: Date.now(),
+          debug,
+        })
+        return
+      }
+
+      const record = recordFromAttendanceResponse(result.data, {
+        lessonId,
+        source: 'manual',
+        username: code,
+        studentCode: code,
+      })
+      if (record) {
+        undoRedo.ensureAttendanceRecorded(record)
+        recordRow({
+          code,
+          label: entry.label,
+          status: 'created',
+          message: `تم التسجيل — ${payLabelFor(override)} (تأكيد من الاستجابة)`,
+          recordId: record.id,
+          at: Date.now(),
+          debug: {
+            ...debug,
+            note: 'Observer confirmation missing; undo snapshot built from POST response.',
+          },
+        })
+      } else {
+        recordRow({
+          code,
+          label: entry.label,
+          status: 'error',
+          message: event === 'timeout'
+            ? 'تم الإرسال لكن لم يصل تأكيد قابل للتراجع — راجع السجل يدويًا'
+            : 'استجابة غير متوقعة من الخادم',
+          at: Date.now(),
+          debug: {
+            ...debug,
+            note: `${debug.note ?? ''} Could not build an undoable record from the response.`.trim(),
+          },
+        })
+      }
+    }
 
     const worker = async (): Promise<void> => {
       while (true) {
@@ -634,68 +825,52 @@ export async function runBulkAttendance(options: {
         const i = index++
         if (i >= toRun.length) return
         const entry = toRun[i]
-        const code = entry.code.toUpperCase()
-        const override = overrideMap.get(code)
-        const wait = waitForCode(code, timeoutMs)
-        const result = await submitSchoolAttendance(code, lessonId, override)
-        if (!result.ok) {
-          wait.cancel()
-          const duplicate = duplicateMessage(result.message)
+        try {
+          await processEntry(entry)
+        } catch (error) {
+          // One unexpected exception must not take down the other workers.
           recordRow({
-            code,
-            label: entry.label,
-            status: duplicate ? 'duplicate' : 'error',
-            message: result.message,
-            at: Date.now(),
-          })
-          if (!duplicate) {
-            options.signal.stop = true
-            stopped = true
-          }
-          continue
-        }
-        // Confirmation must come from the shared observer: a record we cannot
-        // undo must never be reported as part of the reversible batch.
-        const event = await Promise.race([
-          wait.promise,
-          sleep(Math.min(timeoutMs, 4000)).then(() => 'timeout' as const),
-        ])
-        wait.cancel()
-        if (event === 'timeout') {
-          const id = result.data.id ?? result.data.record_id
-          recordRow({
-            code,
+            code: entry.code.toUpperCase(),
             label: entry.label,
             status: 'error',
-            message: `تم الإرسال لكن لم يصل تأكيد المراقب — راجع السجل يدويًا${id == null ? '' : ` (#${id})`}`,
-            recordId: id == null ? undefined : String(id),
+            message: `استثناء أثناء الإرسال: ${error instanceof Error ? error.message : String(error)}`,
             at: Date.now(),
+            debug: {
+              note: error instanceof Error ? error.stack ?? error.message : String(error),
+            },
           })
-          options.signal.stop = true
-          stopped = true
-        } else if (event.type === 'add') {
-          undoRedo.ensureAttendanceRecorded(event.record)
-          const payLabel = override ? {
-            paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي/مؤجل',
-          }[override.status] : 'افتراضي الحصة'
-          recordRow({ code, label: entry.label, status: 'created', message: `تم التسجيل — ${payLabel}`, recordId: event.record.id, at: Date.now() })
-        } else if (event.type === 'duplicate') {
-          recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: event.record.id, at: Date.now() })
-        } else {
-          recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() })
-          options.signal.stop = true
-          stopped = true
+          console.error('[Tamperina] bulk row failed', entry.code, error)
         }
+        if (!options.signal.stop) await sleep(40)
       }
     }
 
     const workers = Array.from({ length: Math.min(concurrency, toRun.length || 1) }, () => worker())
-    await Promise.all(workers)
+    const outcomes = await Promise.allSettled(workers)
+    for (const outcome of outcomes) {
+      if (outcome.status === 'rejected') {
+        console.error('[Tamperina] bulk worker crashed', outcome.reason)
+        recordRow({
+          code: '',
+          status: 'error',
+          message: `توقف عامل إرسال: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`,
+          at: Date.now(),
+          debug: { note: 'Worker-level rejection; remaining rows may not have been sent.' },
+        })
+      }
+    }
     if (options.signal.stop && !stopped) stopped = true
-    return { rows, created, duplicates, skipped, failed, stopped }
+    return { rows, created, duplicates, skipped, failed, stopped, context: makeContext() }
   }
 
   // ---- سنتر (center) mode: sequential scan-form loop (single input/form) ----
+  const centerLessonId = options.lessonId ?? currentLessonIdFromPage() ?? ''
+  const centerKnown = new Set(
+    (centerLessonId
+      ? undoRedo.knownRecordCodesForLesson(centerLessonId)
+      : undoRedo.knownRecordCodes).map((c) => c.toUpperCase()),
+  )
+  let consecutiveTimeouts = 0
   for (const entry of options.entries) {
     const code = entry.code.toUpperCase()
     if (options.signal.stop) {
@@ -703,16 +878,28 @@ export async function runBulkAttendance(options: {
       break
     }
 
-    if (undoRedo.knownRecordCodes.includes(code)) {
+    if (centerKnown.has(code)) {
       recordRow({ code, label: entry.label, status: 'skipped-known', message: 'مسجّل بالفعل', at: Date.now() })
       continue
     }
 
     const scan = detectScanForm()
     if (!scan) {
-      recordRow({ code, label: entry.label, status: 'error', message: 'تعذّر العثور على نموذج/حقل الإدخال', at: Date.now() })
-      stopped = true
-      break
+      recordRow({
+        code,
+        label: entry.label,
+        status: 'error',
+        message: 'تعذّر العثور على نموذج/حقل الإدخال',
+        at: Date.now(),
+        debug: { note: `detectScanForm() returned null; path=${location.pathname}` },
+      })
+      consecutiveTimeouts++
+      if (consecutiveTimeouts >= 3) {
+        stopped = true
+        break
+      }
+      await sleep(40)
+      continue
     }
 
     scan.input.value = code
@@ -720,20 +907,41 @@ export async function runBulkAttendance(options: {
     submitScanForm(scan.form, scan.input)
 
     const result = await wait.promise
+    const debug: BulkRowDebug = {
+      request: { path: 'page scan form', payload: { code, lesson_id: centerLessonId } },
+      observer: result === 'timeout' ? 'timeout' : result.type,
+    }
 
     if (result === 'timeout') {
-      recordRow({ code, label: entry.label, status: 'timeout', message: 'لم يصل تأكيد من الخادم', at: Date.now() })
-      stopped = true
-      break
+      recordRow({
+        code,
+        label: entry.label,
+        status: 'timeout',
+        message: 'لم يصل تأكيد من الخادم',
+        at: Date.now(),
+        debug: {
+          ...debug,
+          note: `No matching attendance event within ${timeoutMs}ms from ${scan.inputSelector}`,
+        },
+      })
+      consecutiveTimeouts++
+      // Keep going so one slow code cannot cut the batch short, but give up
+      // if the form has clearly stopped responding altogether.
+      if (consecutiveTimeouts >= 3) {
+        stopped = true
+        break
+      }
+      continue
     }
+    consecutiveTimeouts = 0
 
     if (result.type === 'add') {
       undoRedo.ensureAttendanceRecorded(result.record)
-      recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', recordId: result.record.id, at: Date.now() })
+      recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', recordId: result.record.id, at: Date.now(), debug })
     } else if (result.type === 'duplicate') {
-      recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: result.record.id, at: Date.now() })
+      recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: result.record.id, at: Date.now(), debug })
     } else {
-      recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() })
+      recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now(), debug })
     }
 
     // Minimal pacing to let the form/site settle between submissions.
@@ -742,7 +950,71 @@ export async function runBulkAttendance(options: {
 
   if (options.signal.stop && !stopped) stopped = true
 
-  return { rows, created, duplicates, skipped, failed, stopped }
+  return { rows, created, duplicates, skipped, failed, stopped, context: makeContext() }
+}
+
+/** Plain-text report for pasting into a bug report. Contains no cookies/tokens. */
+export function formatBulkDiagnosticReport(
+  summary: BulkRunSummary,
+  entries: Array<{ code: string, label?: string }>,
+): string {
+  const c = summary.context
+  const lines: string[] = []
+  lines.push('=== TAMPERINA BULK ATTENDANCE DIAGNOSTIC ===')
+  lines.push(`Time: ${new Date(c.startedAt).toLocaleString()} → ${new Date(c.finishedAt).toLocaleString()}`)
+  lines.push(`Page: ${c.href}`)
+  lines.push(`Lesson: ${c.lessonId || '(unknown)'} | Mode: ${c.paymentMode} | CSRF token: ${c.csrfPresent ? 'present' : 'MISSING'}`)
+  lines.push(`Input lines: ${entries.length} | Result rows: ${summary.rows.length}`)
+  lines.push(`Created: ${summary.created} | Existing: ${summary.duplicates} | Skipped-known: ${summary.skipped} | Failed: ${summary.failed} | Stopped: ${summary.stopped ? 'YES' : 'no'}`)
+  lines.push('')
+
+  const attempted = new Set(summary.rows.map((row) => row.code.toUpperCase()))
+  const notAttempted: string[] = []
+  for (const entry of entries) {
+    const code = entry.code.toUpperCase()
+    if (!attempted.has(code) && !notAttempted.includes(code)) notAttempted.push(code)
+  }
+  lines.push(`--- NEVER ATTEMPTED (${notAttempted.length}) ---`)
+  lines.push(notAttempted.length ? notAttempted.join(', ') : '(none — every input line produced a result row)')
+  lines.push('')
+
+  const problems = summary.rows.filter((row) => row.status === 'error' || row.status === 'timeout')
+  lines.push(`--- PROBLEM ROWS (${problems.length}) ---`)
+  if (!problems.length) {
+    lines.push('(none)')
+  } else {
+    problems.forEach((row, index) => {
+      lines.push(`[${index + 1}] ${row.code}${row.label ? ` (${row.label})` : ''} — ${row.status}`)
+      lines.push(`    message: ${row.message ?? '(none)'}`)
+      if (row.debug?.request) {
+        lines.push(`    request: ${row.debug.request.path} ${JSON.stringify(row.debug.request.payload)}`)
+      }
+      if (row.debug?.response) {
+        const r = row.debug.response
+        lines.push(`    response: HTTP ${r.status} ${r.statusText} | ${r.contentType || '(no content-type)'}`)
+        lines.push(`    body: ${r.body || '(empty)'}`)
+      }
+      if (row.debug?.observer) lines.push(`    observer: ${row.debug.observer}`)
+      if (row.debug?.note) lines.push(`    note: ${row.debug.note}`)
+    })
+  }
+  lines.push('')
+
+  const skipped = summary.rows.filter(
+    (row) => row.status === 'skipped-known' || row.status === 'duplicate',
+  )
+  lines.push(`--- ALREADY REGISTERED / SKIPPED (${skipped.length}) ---`)
+  lines.push(skipped.length
+    ? skipped.map((row) => `${row.code}${row.message ? ` — ${row.message}` : ''}`).join('\n')
+    : '(none)')
+  lines.push('')
+
+  const ok = summary.rows.filter((row) => row.status === 'created')
+  lines.push(`--- CREATED ROWS (${ok.length}, first 10) ---`)
+  for (const row of ok.slice(0, 10)) {
+    lines.push(`${row.code}${row.recordId ? ` → #${row.recordId}` : ''}${row.debug?.observer ? ` [observer: ${row.debug.observer}]` : ''}`)
+  }
+  return lines.join('\n')
 }
 
 export function formatCandidate(candidate: StudentCandidate): string {

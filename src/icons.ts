@@ -26,6 +26,7 @@ import keyboard from 'lucide-static/icons/keyboard.svg?raw'
 import copy from 'lucide-static/icons/copy.svg?raw'
 import download from 'lucide-static/icons/download.svg?raw'
 import refreshCw from 'lucide-static/icons/refresh-cw.svg?raw'
+import trash from 'lucide-static/icons/trash-2.svg?raw'
 
 export const icons = {
   flip: flipHorizontal,
@@ -57,4 +58,5 @@ export const icons = {
   copy,
   download,
   refresh: refreshCw,
+  trash,
 } as const

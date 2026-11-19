@@ -4,7 +4,7 @@ import cairoFontCss from 'virtual:tamperina-fonts'
 import shellStyle from '../ui/styles.css?style'
 import { icons } from '../icons'
 import { attachToaster, toast } from './toast'
-import { getUndoRedoController, type UndoRedoController } from './undoRedo'
+import { getUndoRedoController, type LiveRecord, type UndoRedoController } from './undoRedo'
 import {
   commitExamTyping,
   diagnoseHomeworkButtons,
@@ -22,6 +22,7 @@ import { mountFindBar } from './findBar'
 import {
   currentLessonIdFromPage,
   detectScanForm,
+  formatBulkDiagnosticReport,
   formatCandidate,
   parseBulkEntries,
   resolveNameEntry,
@@ -144,6 +145,23 @@ function isEditableTarget(target: EventTarget | null): boolean {
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+}
+
+/**
+ * Shortcuts that must still reach the document-level handlers when pressed
+ * inside Tamperina's modal. Everything else is contained in the shadow tree so
+ * the platform's scanner handler cannot mistake it for untargeted keypresses.
+ */
+function isGlobalShortcutKey(event: Event): boolean {
+  if (!('key' in event)) return false
+  const keyEvent = event as KeyboardEvent
+  if (keyEvent.key === 'Escape') return true
+  if (keyEvent.altKey && keyEvent.shiftKey && keyEvent.code === 'KeyT') return true
+  if (keyEvent.ctrlKey && keyEvent.altKey && keyEvent.code === 'KeyF') return true
+  if ((keyEvent.ctrlKey || keyEvent.metaKey) && !keyEvent.altKey) {
+    return keyEvent.code === 'KeyZ' || keyEvent.code === 'KeyY'
+  }
+  return false
 }
 
 /**
@@ -271,6 +289,15 @@ export function mountShell(): void {
                 </span>
                 <span class="feature-badge on">متاح</span>
               </button>
+
+              <button type="button" class="bulk-item" data-bulk-open="remove">
+                <span class="feature-icon">${icons.trash}</span>
+                <span class="bulk-item-text">
+                  <strong>إزالة كل حضور الحصة</strong>
+                  <small>حذف جميع سجلات الحاضرين في الحصة دفعة واحدة قابلة للتراجع</small>
+                </span>
+                <span class="feature-badge on">متاح</span>
+              </button>
             </div>
           </div>
 
@@ -328,6 +355,21 @@ export function mountShell(): void {
                 <div class="history-empty">لا يوجد تنفيذ بعد.</div>
               </div>
 
+              <div class="bulk-diagnostics" data-bulk-diagnostics hidden>
+                <div class="bulk-undecided-head">
+                  <div class="bulk-undecided-title">
+                    <strong>تقرير التشخيص</strong>
+                    <span class="feature-badge busy" data-bulk-debug-count>0</span>
+                  </div>
+                  <div class="bulk-resolve-actions">
+                    <button type="button" class="bulk-mini-btn" data-bulk-copy-debug>نسخ التقرير</button>
+                    <button type="button" class="bulk-mini-btn" data-bulk-copy-failed>نسخ الأكواد الفاشلة</button>
+                    <button type="button" class="bulk-mini-btn" data-bulk-copy-skipped>نسخ المتخطين</button>
+                  </div>
+                </div>
+                <pre class="bulk-debug-text" data-bulk-debug-text></pre>
+              </div>
+
               <p class="feature-note">${icons.shieldAlert}
                 يتم الإرسال طالبًا بطالب عبر نموذج الصفحة نفسه. التراجع بعد اكتمال الدفعة يلغي كل السجلات المُنشأة في خطوة واحدة. إذا اختلف رقم الحصة عن الحصة المفتوحة، يجب فتح الرابط الصحيح أولًا.
               </p>
@@ -376,6 +418,58 @@ export function mountShell(): void {
 
               <p class="feature-note" data-export-hint>${icons.shieldAlert}
                 تُبنى القائمة من سجلات الحضور التي رصدها Tamperina في هذه الجلسة. إذا كانت فارغة، افتح صفحة الحضور وانتظر تحميل القائمة ثم اضغط تحديث.
+              </p>
+            </div>
+          </div>
+
+          <div class="bulk-detail" data-bulk-view="remove" hidden>
+            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <div class="bulk-card" data-remove-root>
+              <div class="bulk-head">
+                <span class="feature-icon">${icons.trash}</span>
+                <span class="feature-titles">
+                  <strong>إزالة كل حضور الحصة</strong>
+                  <small>حذف دفعة واحدة لكل سجلات الحاضرين</small>
+                </span>
+                <span class="feature-badge off" data-remove-badge>جاهز</span>
+              </div>
+
+              <p class="bulk-note">
+                تُحمَّل الآن قائمة الطلاب المسجّلين حاضرين في رقم الحصة المحدد. بعد المعاينة، فعّل التسليح ثم اضغط حذف الكل. تُحذف السجلات واحدًا تلو الآخر وتُسجَّل كدفعة واحدة يمكن إلغاؤها بـ Ctrl+Z.
+              </p>
+              <div class="bulk-warn">هذا الإجراء يحذف سجلات الحضور الفعلية في الحصة المحددة. تأكد من رقم الحصة قبل التنفيذ — خصوصًا إذا كان التسجيل السابق قد أضاف جزءًا فقط من الطلاب.</div>
+
+              <div class="bulk-grid">
+                <label class="bulk-field">
+                  <span>رقم الحصة (الحالية افتراضيًا)</span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-remove-lesson placeholder="مثال: 299" />
+                </label>
+                <div class="bulk-field">
+                  <span>السجلات المراد حذفها</span>
+                  <div class="bulk-export-summary" data-remove-summary>—</div>
+                </div>
+              </div>
+
+              <div class="bulk-actions">
+                <button type="button" class="action-btn" data-remove-refresh>${icons.refresh}<span>تحديث القائمة</span></button>
+                <button type="button" class="action-btn" data-remove-arm disabled>${icons.lock}<span>تسليح الحذف</span></button>
+                <button type="button" class="action-btn bulk-run" data-remove-run disabled>${icons.play}<span>حذف الكل</span></button>
+                <button type="button" class="action-btn bulk-stop" data-remove-stop disabled>${icons.pause}<span>إيقاف</span></button>
+              </div>
+
+              <div class="bulk-preview" data-remove-preview>لم يتم تحميل القائمة بعد.</div>
+
+              <div class="history-head">
+                ${icons.history}
+                <strong>سجل الحذف</strong>
+                <small data-remove-log-count>0</small>
+              </div>
+              <div class="bulk-log" data-remove-log>
+                <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+              </div>
+
+              <p class="feature-note">${icons.shieldAlert}
+                يجب أن يكون التراجع مفعّلًا حتى تُسجَّل عملية الحذف. بعد اكتمال الحذف يمكنك إعادة كل السجلات بضغطة Ctrl+Z، أو إعادة تنفيذ الحذف بـ Ctrl+Y.
               </p>
             </div>
           </div>
@@ -431,6 +525,17 @@ export function mountShell(): void {
   `
   shadow.appendChild(backdrop)
 
+  // Firefox retargets key events from a shadow tree to the host <div>. The
+  // platform's document-level scanner handler then thinks no field is focused
+  // and cancels printable keys. Keep typing inside Tamperina's UI (modal and
+  // find bar); only the known global shortcuts bubble to document as before.
+  for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'compositionstart', 'compositionupdate', 'compositionend'] as const) {
+    shadow.addEventListener(type, (event) => {
+      if (isGlobalShortcutKey(event)) return
+      event.stopPropagation()
+    })
+  }
+
   const findBar = mountFindBar(shadow)
 
   const launcher = shellEl.querySelector<HTMLElement>('.launcher')!
@@ -485,13 +590,6 @@ export function mountShell(): void {
         title: 'شريط البحث في التقييم',
         desc: 'Ctrl+Alt+F يفتح شريط بحث في أسفل الصفحة يبحث في كل صفوف الطلاب. كتابة رقم مكوّن من ٤ خانات تحدد الطالب تلقائيًا.',
         note: 'Enter / Shift+Enter للتنقل بين النتائج، وEsc للإغلاق.',
-      },
-      {
-        id: 'homework-buttons' as const,
-        icon: icons.graduationCap,
-        title: 'أزرار تقييم الواجب',
-        desc: 'أزرار ملوّنة متوهجة بدل قائمة الواجب. الضغط على الزر يختار الطالب ويحدّث التقدير، وقراءة النتيجة تتم عبر نموذج الصفحة نفسه.',
-        note: 'تعمل معها نفس اختصارات التقدير عند اختيار طالب.',
       },
     ]
 
@@ -887,6 +985,13 @@ export function mountShell(): void {
   })
 
   document.addEventListener('keydown', (event) => {
+    // Events from the modal cross a shadow boundary, so event.target has been
+    // retargeted to the host div. Use the composed path to see the real field.
+    const path = event.composedPath()
+    const realTarget = (path[0] as HTMLElement | null) ?? null
+    const host = document.getElementById(HOST_ID)
+    const insideTamperina = !!host && path.includes(host)
+
     // Evaluation find bar: Ctrl+Alt+F (plain Ctrl+F stays with the browser).
     if (event.ctrlKey && event.altKey && !event.metaKey && event.code === 'KeyF' && isEvaluationPage()) {
       if (isFeatureEnabled('evaluation-find')) {
@@ -902,7 +1007,7 @@ export function mountShell(): void {
       if ((undoShortcut || redoShortcut)
         && (undoRedo.supported || undoRedo.canUndo || undoRedo.canRedo)
         && undoRedo.enabled
-        && (isAttendancePage() || !isEditableTarget(event.target))) {
+        && (isAttendancePage() || insideTamperina || !isEditableTarget(realTarget))) {
         event.preventDefault()
         if (redoShortcut) void undoRedo.redo()
         else void undoRedo.undo()
@@ -930,8 +1035,9 @@ export function mountShell(): void {
       && isFeatureEnabled('student-select')
       && !event.ctrlKey && !event.metaKey && !event.altKey
       && !findBar.isOpen()
-      && !isEditableTarget(event.target)
-      && !(event.target as Element | null)?.closest?.('button, a, [role="button"]')) {
+      && !insideTamperina
+      && !isEditableTarget(realTarget)
+      && !realTarget?.closest?.('button, a, [role="button"]')) {
       const selected = getSelectedRow()
       if (selected && handleSelectedRowKey(event, selected)) {
         event.preventDefault()
@@ -963,6 +1069,12 @@ export function mountShell(): void {
   const bulkResolveBox = bulkRoot.querySelector<HTMLElement>('[data-bulk-resolve]')!
   const bulkLog = bulkRoot.querySelector<HTMLElement>('[data-bulk-log]')!
   const bulkLogCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-log-count]')!
+  const bulkDiagnostics = bulkRoot.querySelector<HTMLElement>('[data-bulk-diagnostics]')!
+  const bulkDebugText = bulkRoot.querySelector<HTMLElement>('[data-bulk-debug-text]')!
+  const bulkDebugCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-debug-count]')!
+  const bulkCopyDebugBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-copy-debug]')!
+  const bulkCopyFailedBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-copy-failed]')!
+  const bulkCopySkippedBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-copy-skipped]')!
   const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
   const bulkModeBtns = Array.from(bulkRoot.querySelectorAll<HTMLButtonElement>('[data-bulk-mode-toggle] [data-mode]'))
 
@@ -984,6 +1096,12 @@ export function mountShell(): void {
   let bulkStop = { stop: false }
   let bulkLessonTouched = false
   let bulkLogRows: BulkRowResult[] = []
+  let bulkDiagnosticReport = ''
+  const BULK_LAST_RUN_KEY = 'tamperina.bulk.lastRun.v1'
+  interface StoredBulkRun {
+    report: string
+    rows: BulkRowResult[]
+  }
   let bulkAnalysisToken = 0
   let bulkPayMode: PaymentMode = 'center'
   // Walk-in registration preview (names with no matching code)
@@ -1099,10 +1217,12 @@ export function mountShell(): void {
         : 'err'
       const label = row.label ? `${escapeBulk(row.label)} · ` : ''
       const detail = row.recordId ? ` · #${escapeBulk(row.recordId)}` : ''
+      const http = row.debug?.response ? ` · HTTP ${row.debug.response.status}` : ''
       const msg = row.message ? ` — ${escapeBulk(row.message)}` : ''
-      return `<div class="bulk-log-item ${cls}">
+      const hover = row.debug ? ` title="${escapeBulk(JSON.stringify(row.debug))}"` : ''
+      return `<div class="bulk-log-item ${cls}"${hover}>
         <span class="bulk-log-code" title="${escapeBulk(label)}${escapeBulk(row.code)}">${escapeBulk(row.code)}</span>
-        <span class="bulk-log-status">${label}${statusLabel[row.status]}${detail}${msg}</span>
+        <span class="bulk-log-status">${label}${statusLabel[row.status]}${detail}${http}${msg}</span>
         <span class="bulk-log-time">${formatTime(row.at)}</span>
       </div>`
     }).join('')
@@ -1111,6 +1231,36 @@ export function mountShell(): void {
   function appendBulkRow(row: BulkRowResult): void {
     bulkLogRows.push(row)
     renderBulkLog()
+  }
+
+  function saveLastBulkRun(): void {
+    try {
+      ;(unsafeWindow ?? window).sessionStorage?.setItem(BULK_LAST_RUN_KEY, JSON.stringify({
+        report: bulkDiagnosticReport,
+        rows: bulkLogRows,
+      } satisfies StoredBulkRun))
+    } catch {
+      // sessionStorage can be unavailable; the in-memory report still works.
+    }
+  }
+
+  function restoreLastBulkRun(): void {
+    try {
+      const raw = (unsafeWindow ?? window).sessionStorage?.getItem(BULK_LAST_RUN_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw) as StoredBulkRun
+      if (!parsed || typeof parsed.report !== 'string' || !Array.isArray(parsed.rows)) return
+      bulkDiagnosticReport = parsed.report
+      bulkLogRows = parsed.rows
+      renderBulkLog()
+      bulkDebugText.textContent = parsed.report
+      bulkDebugCount.textContent = String(
+        parsed.rows.filter((row) => row.status === 'error' || row.status === 'timeout').length,
+      )
+      bulkDiagnostics.hidden = false
+    } catch {
+      // Ignore missing or malformed data from an older version.
+    }
   }
 
   function disarmBulk(reason?: string): void {
@@ -1437,7 +1587,7 @@ export function mountShell(): void {
           <div class="bulk-resolve-actions">
             <button type="button" class="bulk-mini-btn" data-bulk-copy-undecided data-copy-text="${escapeBulk(undecidedText)}">نسخ</button>
             <button type="button" class="bulk-mini-btn" data-resolve-action="drop-all">تجاهل الكل</button>
-            <button type="button" class="bulk-mini-btn" data-walkin-toggle aria-expanded="${walkInPreviewOpen}">تسجيل طلاب جدد بدون كارت</button>
+            <button type="button" class="bulk-mini-btn" data-walkin-toggle aria-expanded="${walkInPreviewOpen}">تسجيل بدون كود</button>
           </div>
         </div>
         <div class="bulk-note-inline">التجاهل يُبقي الاسم هنا ويُخرجه فقط من دفعة الحضور — يمكنك نسخ القائمة كاملة للتعامل معها يدويًا، أو تسجيل الأسماء كطلاب جدد عبر نموذج الصفحة.</div>
@@ -1748,6 +1898,9 @@ export function mountShell(): void {
     bulkRunning = true
     bulkStop = { stop: false }
     bulkLogRows = []
+    bulkDiagnosticReport = ''
+    bulkDebugText.textContent = ''
+    bulkDiagnostics.hidden = true
     renderBulkLog()
     disarmBulk()
     updateBulkButtons()
@@ -1762,6 +1915,15 @@ export function mountShell(): void {
         paymentOverrides,
         lessonId,
       })
+
+      bulkDiagnosticReport = formatBulkDiagnosticReport(summary, entries)
+      bulkDebugText.textContent = bulkDiagnosticReport
+      bulkDiagnostics.hidden = false
+      bulkDebugCount.textContent = String(
+        summary.rows.filter((row) => row.status === 'error' || row.status === 'timeout').length,
+      )
+      console.info('[Tamperina] bulk attendance diagnostic\n' + bulkDiagnosticReport)
+      saveLastBulkRun()
 
       const recordedBeforeCommit = undoRedo.batchCount
       const committed = undoRedo.commitBatch({
@@ -1782,17 +1944,23 @@ export function mountShell(): void {
           debug: undoRedo.debug(),
         })
       } else if (summary.created > 0) {
+        const breakdown = `تم ${summary.created} · موجود ${summary.duplicates} · متخطى (مسجّل مسبقًا) ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}`
         toast({
           title: 'اكتمل التسجيل الجماعي',
-          description: `تم تسجيل ${summary.created} طالب. يمكن التراجع عن الدفعة كاملة بـ Ctrl+Z.`,
-          variant: 'applied',
-          duration: 7000,
+          description: `${breakdown} — من ${entries.length} عنصر. ${summary.failed > 0 ? 'راجع «تقرير التشخيص» لمعرفة الخطأ بالضبط. ' : ''}يمكن التراجع عن الدفعة كاملة بـ Ctrl+Z.`,
+          variant: summary.failed > 0 ? 'warning' : 'applied',
+          duration: 9000,
         })
-      } else if (summary.stopped && summary.failed > 0) {
+        console.info('[Tamperina] bulk attendance summary', breakdown, {
+          entries: entries.length,
+          rows: summary.rows,
+        })
+      } else if (summary.failed > 0 || summary.duplicates > 0 || summary.skipped > 0) {
         toast({
-          title: 'توقف التنفيذ',
-          description: 'تحقق من السجل لمعرفة السبب.',
+          title: 'لم تُسجَّل عناصر جديدة',
+          description: `من ${entries.length}: موجود ${summary.duplicates} · متخطى (مسجّل مسبقًا) ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}. راجع «تقرير التشخيص» للتفاصيل.`,
           variant: 'warning',
+          duration: 9000,
         })
       } else {
         toast({
@@ -1823,6 +1991,34 @@ export function mountShell(): void {
   bulkPreviewBtn.addEventListener('click', () => {
     refreshBulkLesson()
     void analyzeBulkInput()
+  })
+  bulkCopyDebugBtn.addEventListener('click', () => {
+    void copyPlainText(
+      bulkDiagnosticReport || 'لا يوجد تقرير بعد — شغّل الدفعة أولًا.',
+      'تم نسخ تقرير التشخيص',
+      'الصق التقرير في رسالة المشكلة لتحديد السبب بالضبط.',
+    )
+  })
+  bulkCopyFailedBtn.addEventListener('click', () => {
+    const failedCodes = bulkLogRows
+      .filter((row) => row.status === 'error' || row.status === 'timeout')
+      .map((row) => row.code)
+    void copyPlainText(
+      failedCodes.join('\n') || 'لا توجد أكواد فاشلة.',
+      'تم نسخ الأكواد الفاشلة',
+      `${failedCodes.length} كود — يمكن إعادة تحليلها منفردة.`,
+    )
+  })
+  bulkCopySkippedBtn.addEventListener('click', () => {
+    const skippedRows = bulkLogRows.filter(
+      (row) => row.status === 'skipped-known' || row.status === 'duplicate',
+    )
+    const text = skippedRows.map((row) => `${row.code}${row.label ? `,${row.label}` : ''}`).join('\n')
+    void copyPlainText(
+      text || 'لا توجد أكواد متخطاة.',
+      'تم نسخ الأكواد المتخطاة',
+      `${skippedRows.length} طالب كانوا مسجّلين مسبقًا في الحصة.`,
+    )
   })
   bulkArmBtn.addEventListener('click', () => {
     if (!readyToArm()) {
@@ -2046,6 +2242,7 @@ export function mountShell(): void {
 
   // Prefill lesson and keep bulk controls in sync with undoRedo state.
   refreshBulkLesson()
+  restoreLastBulkRun()
   // Auto-detect mode from the page
   applyPaymentMode(detectPagePaymentMode())
   updateBulkInputPlaceholder()
@@ -2684,9 +2881,264 @@ export function mountShell(): void {
 
   updateEvalBulkButtons()
 
+  // ---- bulk attendance removal --------------------------------------------
+  const removeRoot = backdrop.querySelector<HTMLElement>('[data-remove-root]')!
+  const removeLessonInput = removeRoot.querySelector<HTMLInputElement>('[data-remove-lesson]')!
+  const removeSummary = removeRoot.querySelector<HTMLElement>('[data-remove-summary]')!
+  const removePreview = removeRoot.querySelector<HTMLElement>('[data-remove-preview]')!
+  const removeBadge = removeRoot.querySelector<HTMLElement>('[data-remove-badge]')!
+  const removeRefreshBtn = removeRoot.querySelector<HTMLButtonElement>('[data-remove-refresh]')!
+  const removeArmBtn = removeRoot.querySelector<HTMLButtonElement>('[data-remove-arm]')!
+  const removeRunBtn = removeRoot.querySelector<HTMLButtonElement>('[data-remove-run]')!
+  const removeStopBtn = removeRoot.querySelector<HTMLButtonElement>('[data-remove-stop]')!
+  const removeLog = removeRoot.querySelector<HTMLElement>('[data-remove-log]')!
+  const removeLogCount = removeRoot.querySelector<HTMLElement>('[data-remove-log-count]')!
+
+  type RemoveLogStatus = 'removed' | 'error' | 'stopped'
+  interface RemoveLogRow {
+    label: string
+    status: RemoveLogStatus
+    message?: string
+    at: number
+  }
+
+  let removeRecords: LiveRecord[] = []
+  let removeArmed = false
+  let removeRunning = false
+  let removeStop = { stop: false }
+  let removeLogRows: RemoveLogRow[] = []
+
+  function removeSupported(): boolean {
+    return isAttendancePage()
+  }
+
+  function setRemoveBadge(text: string, className: string): void {
+    removeBadge.textContent = text
+    removeBadge.className = `feature-badge ${className}`
+  }
+
+  function removeLessonId(): string {
+    return removeLessonInput.value.trim() || currentLessonIdFromPage() || undoRedo.lessonId || ''
+  }
+
+  function removeRecordLabel(record: LiveRecord): string {
+    const code = String(record.studentCode ?? record.username ?? '').trim()
+    const name = String(record.name ?? '').trim()
+    return name && code ? `${name} (${code})` : name || code || `سجل ${record.id}`
+  }
+
+  function renderRemoveLog(): void {
+    removeLogCount.textContent = String(removeLogRows.length)
+    if (!removeLogRows.length) {
+      removeLog.innerHTML = `<div class="history-empty">لا يوجد تنفيذ بعد.</div>`
+      return
+    }
+    const statusLabel: Record<RemoveLogStatus, string> = {
+      removed: 'تم الحذف',
+      error: 'خطأ',
+      stopped: 'متوقف',
+    }
+    removeLog.innerHTML = removeLogRows.slice().reverse().map((row) => {
+      const cls = row.status === 'removed' ? 'ok' : row.status === 'stopped' ? 'warn' : 'err'
+      const msg = row.message ? ` — ${escapeHtml(row.message)}` : ''
+      return `<div class="bulk-log-item ${cls}">
+        <span class="bulk-log-code" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
+        <span class="bulk-log-status">${statusLabel[row.status]}${msg}</span>
+        <span class="bulk-log-time">${formatTime(row.at)}</span>
+      </div>`
+    }).join('')
+  }
+
+  function appendRemoveLog(row: RemoveLogRow): void {
+    removeLogRows.push(row)
+    renderRemoveLog()
+  }
+
+  function renderRemovePreview(): void {
+    const lesson = removeLessonId()
+    if (!removeSupported()) {
+      removeSummary.textContent = '—'
+      removePreview.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/attendance/scan</code> أولًا.</div>`
+      return
+    }
+    if (!removeRecords.length) {
+      removeSummary.textContent = lesson ? `حصة ${lesson} · 0 سجل` : '0 سجل'
+      removePreview.textContent = 'لا توجد سجلات حضور لهذه الحصة.'
+      return
+    }
+    const lines = removeRecords.slice(0, 20).map((record) => `<div class="bulk-remove-name">${escapeHtml(removeRecordLabel(record))}</div>`).join('')
+    const more = removeRecords.length > 20 ? `<div class="bulk-note-inline">و ${removeRecords.length - 20} سجلًا آخر…</div>` : ''
+    removeSummary.textContent = `حصة ${lesson || '?'} · ${removeRecords.length} سجل`
+    removePreview.innerHTML = `<strong>${removeRecords.length} سجل سيُحذف:</strong>${lines}${more}`
+  }
+
+  function updateRemoveButtons(): void {
+    const supported = removeSupported()
+    const hasRecords = removeRecords.length > 0
+    removeRefreshBtn.disabled = !supported || removeRunning
+    removeArmBtn.disabled = !supported || removeRunning || removeArmed || !hasRecords
+    removeRunBtn.disabled = !supported || removeRunning || !removeArmed || !hasRecords || !undoRedo.enabled
+    removeStopBtn.disabled = !removeRunning
+
+    if (!supported) setRemoveBadge('خارج صفحة الحضور', 'off')
+    else if (removeRunning) setRemoveBadge('جارٍ الحذف', 'busy')
+    else if (removeArmed) setRemoveBadge('مسلّح', 'on')
+    else if (hasRecords) setRemoveBadge('جاهز', 'off')
+    else setRemoveBadge('لا توجد سجلات', 'off')
+  }
+
+  async function refreshRemoveRecords(quiet = false): Promise<void> {
+    if (removeRunning) return
+    if (!removeSupported()) {
+      removeRecords = []
+      removeArmed = false
+      renderRemovePreview()
+      updateRemoveButtons()
+      toast({ title: 'خارج صفحة الحضور', description: 'افتح /attendance/scan أولًا.', variant: 'warning' })
+      return
+    }
+    const lesson = removeLessonId()
+    if (!lesson) {
+      toast({ title: 'رقم الحصة مطلوب', description: 'أدخل رقم الحصة أو افتح رابط الحضور الصحيح.', variant: 'warning' })
+      return
+    }
+    if (!removeLessonInput.value.trim()) removeLessonInput.value = lesson
+    setRemoveBadge('جارٍ التحميل', 'busy')
+    removeRefreshBtn.disabled = true
+    try {
+      removeRecords = await undoRedo.refreshAttendanceLesson(lesson)
+      removeArmed = false
+      renderRemovePreview()
+      if (!quiet) {
+        toast({
+          title: 'تم تحديث القائمة',
+          description: `${removeRecords.length} سجل حاضر في حصة ${lesson}.`,
+          variant: 'info',
+        })
+      }
+    } catch (error) {
+      removeRecords = []
+      removeArmed = false
+      renderRemovePreview()
+      toast({
+        title: 'تعذّر تحميل الحضور',
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      })
+    } finally {
+      updateRemoveButtons()
+    }
+  }
+
+  async function executeRemoveAll(): Promise<void> {
+    if (removeRunning || !removeArmed || !removeRecords.length) return
+    if (!removeSupported()) {
+      toast({ title: 'خارج صفحة الحضور', description: 'افتح /attendance/scan أولًا.', variant: 'warning' })
+      return
+    }
+    if (!undoRedo.enabled) {
+      toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل حذف قابل للإلغاء مع تعطيل التراجع.', variant: 'warning' })
+      return
+    }
+
+    const lesson = removeLessonId()
+    removeRunning = true
+    removeStop = { stop: false }
+    removeArmed = false
+    removeLogRows = []
+    renderRemoveLog()
+    renderRemovePreview()
+    updateRemoveButtons()
+    setRemoveBadge('جارٍ الحذف', 'busy')
+
+    undoRedo.beginBatch(`إزالة حضور الحصة ${lesson}`)
+    let removed = 0
+    let failed = 0
+    let stopped = false
+
+    try {
+      for (const record of removeRecords) {
+        if (removeStop.stop) {
+          stopped = true
+          appendRemoveLog({ label: `حصة ${lesson}`, status: 'stopped', message: 'تم الإيقاف', at: Date.now() })
+          break
+        }
+        const label = removeRecordLabel(record)
+        try {
+          await undoRedo.deleteAttendanceRecord(record)
+          removed++
+          appendRemoveLog({ label, status: 'removed', at: Date.now() })
+        } catch (error) {
+          failed++
+          appendRemoveLog({
+            label,
+            status: 'error',
+            message: error instanceof Error ? error.message : String(error),
+            at: Date.now(),
+          })
+        }
+      }
+
+      const detail = `حُذف ${removed} · فشل ${failed}${stopped ? ' · متوقف' : ''}`
+      const committed = undoRedo.commitBatch({
+        title: `إزالة حضور الحصة ${lesson} (${removed})`,
+        detail,
+      })
+      toast({
+        title: committed ? 'اكتمل حذف الحضور' : 'اكتمل الحذف بدون سجل تراجع',
+        description: committed ? `${detail}. يمكن التراجع عن الدفعة بـ Ctrl+Z.` : detail,
+        variant: committed ? 'applied' : 'warning',
+        duration: 7000,
+      })
+    } catch (error) {
+      undoRedo.commitBatch({
+        title: `إزالة حضور الحصة ${lesson} (${undoRedo.batchCount})`,
+        detail: 'انتهى التنفيذ بخطأ',
+      })
+      toast({
+        title: 'حدث خطأ أثناء الحذف',
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      })
+    } finally {
+      removeRunning = false
+      removeStop.stop = false
+      const remaining = new Set(undoRedo.attendanceRecords.map((record) => record.id))
+      removeRecords = removeRecords.filter((record) => remaining.has(record.id))
+      renderRemovePreview()
+      updateRemoveButtons()
+    }
+  }
+
+  removeRefreshBtn.addEventListener('click', () => { void refreshRemoveRecords() })
+  removeArmBtn.addEventListener('click', () => {
+    if (removeArmBtn.disabled) return
+    removeArmed = true
+    renderRemovePreview()
+    updateRemoveButtons()
+    toast({
+      title: 'الحذف مسلّح',
+      description: 'اضغط «حذف الكل» للبدء. يمكنك التراجع عن الدفعة بـ Ctrl+Z.',
+      variant: 'warning',
+    })
+  })
+  removeRunBtn.addEventListener('click', () => { void executeRemoveAll() })
+  removeStopBtn.addEventListener('click', () => {
+    if (!removeRunning) return
+    removeStop.stop = true
+    setRemoveBadge('جارٍ الإيقاف', 'busy')
+    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف الحذف بعد السجل الحالي.', variant: 'warning' })
+  })
+  removeLessonInput.addEventListener('input', () => {
+    removeArmed = false
+    removeRecords = []
+    renderRemovePreview()
+    updateRemoveButtons()
+  })
+
   const bulkMenu = backdrop.querySelector<HTMLElement>('[data-bulk-view="menu"]')!
   const bulkDetails = Array.from(backdrop.querySelectorAll<HTMLElement>('.bulk-detail[data-bulk-view]'))
-  function showBulkView(view: 'menu' | 'attendance' | 'evaluation' | 'export'): void {
+  function showBulkView(view: 'menu' | 'attendance' | 'evaluation' | 'export' | 'remove'): void {
     bulkMenu.hidden = view !== 'menu'
     for (const detail of bulkDetails) {
       detail.hidden = detail.dataset.bulkView !== view
@@ -2698,12 +3150,16 @@ export function mountShell(): void {
       refreshAttendanceExport()
     } else if (view === 'evaluation') {
       updateEvalBulkButtons()
+    } else if (view === 'remove') {
+      const lesson = currentLessonIdFromPage() || undoRedo.lessonId || ''
+      if (!removeLessonInput.value.trim() && lesson) removeLessonInput.value = lesson
+      void refreshRemoveRecords(true)
     }
   }
   for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-open]'))) {
     btn.addEventListener('click', () => {
       const view = btn.dataset.bulkOpen
-      if (view === 'attendance' || view === 'evaluation' || view === 'export') showBulkView(view)
+      if (view === 'attendance' || view === 'evaluation' || view === 'export' || view === 'remove') showBulkView(view)
     })
   }
   for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-back]'))) {
@@ -2716,6 +3172,13 @@ export function mountShell(): void {
       description: 'معاينة لإشعار تمبرينا باستخدام ملصق applied',
       variant: 'applied',
     })
+  })
+  GM_registerMenuCommand('Tamperina — نسخ تقرير آخر دفعة حضور', () => {
+    void copyPlainText(
+      bulkDiagnosticReport || 'لا يوجد تقرير بعد — شغّل دفعة حضور أولًا.',
+      'تم نسخ تقرير التشخيص',
+      'الصق التقرير في رسالة المشكلة لتحديد السبب بالضبط.',
+    )
   })
   GM_registerMenuCommand('Tamperina — تشخيص أزرار الواجب', () => {
     const report = diagnoseHomeworkButtons()

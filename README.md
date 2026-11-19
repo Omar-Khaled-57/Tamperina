@@ -8,7 +8,7 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 **M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused.
 
-**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, export, evaluation placeholder). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. **تصدير أكواد الحضور** lists the attended students cached for the current lesson as `student code, name` (one per line), with copy and UTF-8 `.txt` download buttons. The full plan lives in `dev/PLAN.md` (gitignored).
+**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, export, evaluation placeholder). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. **تصدير أكواد الحضور** lists the attended students cached for the current lesson as `student code, name` (one per line), with copy and UTF-8 `.txt` download buttons. **إزالة كل حضور الحصة** loads the live attendance list for a lesson, previews it, then deletes every record as one undoable batch (arm before running; `Ctrl+Z` restores them all). The full plan lives in `dev/PLAN.md` (gitignored).
 
 **M3 — Evaluation tools.** Three new independent switches in **المفاتيح**, active on `/evaluation`: select a student and grade them with hotkeys, a Firefox-style find bar on `Ctrl+Alt+F` (4-digit ID auto-selects a student), and glowy homework-grade buttons. All of them set the page's own controls and dispatch `change`, so the platform's auto-save and Tamperina's undo/redo keep working.
 
@@ -104,7 +104,17 @@ For names with no matching code (e.g. a student who forgot their card), the **ت
 
 Confirming fills the platform's own `#walkInForm` (using its **إضافة اسم آخر** button so the generated row keys and listeners stay intact) and submits it, creating the student and recording the collection in the school lesson account. Each successful name is marked **تم تسجيله طالبًا جديدًا**, removed from the attendance batch, and logged. These registrations are **not undoable** with `Ctrl+Z`; if the panel is collapsed, open it in the page first.
 
-Tamperina submits one student at a time (sequential scan-form loop in **سنتر** mode, parallel direct posts in **مدرسة** mode), waits for the shared observer's confirmation, and logs each result. **إيقاف** stops between students. Undo/Redo must be enabled so the run is recorded as one reversible batch. A post without observer confirmation is logged as an error and stops the run instead of being reported as an undoable success.
+Tamperina submits one student at a time (sequential scan-form loop in **سنتر** mode, five parallel direct posts in **مدرسة** mode), waits briefly for the shared observer's confirmation, and logs each result. **إيقاف** stops between students. Undo/Redo must be enabled so the run is recorded as one reversible batch.
+
+A failed post or a missing observer event is logged for that student and the run **continues with the rest of the list** — a single rejection or slow response no longer cuts a 50-student lesson down to 6. In school mode, if the observer event does not arrive, the POST response itself is used to build the undoable snapshot, so successful registrations are still reversible. "Already registered" codes are checked against the selected lesson only, so codes reused in other year groups are not skipped. The completion toast shows the full breakdown (created / already present / skipped / failed).
+
+#### Diagnosing a run that stops short
+
+Every run now produces a **تقرير التشخيص** panel under the execution log. It records, per student: the exact request payload, the HTTP status/status text, the raw response body (including Laravel `errors` fields), whether the undo observer saw an `add`/`duplicate`/timeout, and any exception stack. It also lists input lines that were **never attempted**, which distinguishes a genuine early stop from server rejections.
+
+- **نسخ التقرير** copies the whole report for pasting into a bug report. **نسخ الأكواد الفاشلة** copies just the failed codes so they can be analyzed and retried on their own.
+- The same report is printed to the browser console (`[Tamperina] bulk attendance diagnostic`) and available from Tampermonkey's **Tamperina — نسخ تقرير آخر دفعة حضور** menu command.
+- Hovering any row in the execution log shows its raw diagnostic JSON; failed rows also show `HTTP <status>` inline.
 
 #### School-mode payment input
 
