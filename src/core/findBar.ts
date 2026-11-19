@@ -165,15 +165,31 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
     input.focus()
   }
 
-  function setOpen(open: boolean): void {
-    bar.hidden = !open
-    if (open) {
-      input.focus()
-      input.select()
-      search()
+  let hideTimer: number | undefined
+
+  function setOpen(next: boolean): void {
+    if (next) {
+      if (hideTimer) {
+        window.clearTimeout(hideTimer)
+        hideTimer = undefined
+      }
+      bar.hidden = false
+      requestAnimationFrame(() => {
+        bar.classList.add('is-open')
+        input.focus()
+        input.select()
+        search()
+      })
     } else {
+      if (bar.hidden && !bar.classList.contains('is-open')) return
+      bar.classList.remove('is-open')
       clearHighlights()
       input.blur()
+      if (hideTimer) window.clearTimeout(hideTimer)
+      hideTimer = window.setTimeout(() => {
+        bar.hidden = true
+        hideTimer = undefined
+      }, 220)
     }
   }
 
@@ -202,17 +218,19 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
   closeBtn.addEventListener('click', () => setOpen(false))
 
   const unsubscribe = subscribeRows(() => {
-    if (!bar.hidden) search()
+    if (bar.classList.contains('is-open')) search()
   })
 
   return {
     toggle(open) {
-      setOpen(Boolean(open ?? bar.hidden))
+      const shouldOpen = typeof open === 'boolean' ? open : !bar.classList.contains('is-open')
+      setOpen(shouldOpen)
     },
     isOpen() {
-      return !bar.hidden
+      return bar.classList.contains('is-open')
     },
     destroy() {
+      if (hideTimer) window.clearTimeout(hideTimer)
       unsubscribe()
       bar.remove()
     },
