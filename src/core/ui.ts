@@ -6,6 +6,15 @@ import { icons } from '../icons'
 import { attachToaster, toast } from './toast'
 import { getUndoRedoController, type UndoRedoController } from './undoRedo'
 import {
+  buildPreview,
+  currentLessonIdFromPage,
+  detectScanForm,
+  parseBulkCodes,
+  runBulkAttendance,
+  type BulkPreview,
+  type BulkRowResult,
+} from './bulkAttendance'
+import {
   loadShell,
   saveShell,
   SIZE_MIN,
@@ -140,11 +149,53 @@ export function mountShell(): void {
           <div data-feature-list class="feature-list"></div>
         </div>
         <div data-panel="bulk" hidden>
-          <div class="empty">
-            ${icons.bulk}
-            <strong>العمليات الجماعية غير مهيأة بعد</strong>
-            <p>ستضاف عمليات تسجيل الحضور والتقييم الجماعي بعد دراسة طريقة عمل المنصة.</p>
-            <span class="locked-note">${icons.lock} قيد التجهيز</span>
+          <div class="bulk-card" data-bulk-root>
+            <div class="bulk-head">
+              <span class="feature-icon">${icons.bulk}</span>
+              <span class="feature-titles">
+                <strong>تسجيل حضور جماعي</strong>
+                <small>إدخال أكواد عبر نموذج الحضور</small>
+              </span>
+              <span class="feature-badge off" data-bulk-state-badge>جاهز</span>
+            </div>
+
+            <p class="bulk-note">
+              الصق الأكواد فقط (كود واحد في كل سطر). لا تُكتب الأسماء. تنسيق مقترح للذكاء الاصطناعي: «استخرج أكواد الطلاب فقط، كودًا واحدًا في كل سطر بالأرقام اللاتينية بدون أسماء أو شرح».
+            </p>
+
+            <div class="bulk-grid">
+              <label class="bulk-field">
+                <span>رقم الحصة (الحالية افتراضيًا)</span>
+                <input type="text" inputmode="numeric" class="bulk-input" data-bulk-lesson placeholder="مثال: 293" />
+              </label>
+            </div>
+
+            <label class="bulk-field">
+              <span>قائمة الأكواد</span>
+              <textarea class="bulk-textarea" data-bulk-codes rows="7" placeholder="2349&#10;2350&#10;2351"></textarea>
+            </label>
+
+            <div class="bulk-actions">
+              <button type="button" class="action-btn" data-bulk-preview>${icons.toggles}<span>معاينة</span></button>
+              <button type="button" class="action-btn" data-bulk-arm disabled>${icons.lock}<span>تسليح التنفيذ</span></button>
+              <button type="button" class="action-btn bulk-run" data-bulk-run disabled>${icons.play}<span>تنفيذ</span></button>
+              <button type="button" class="action-btn bulk-stop" data-bulk-stop disabled>${icons.pause}<span>إيقاف</span></button>
+            </div>
+
+            <div class="bulk-preview" data-bulk-preview-box>لم تتم المعاينة بعد.</div>
+
+            <div class="history-head">
+              ${icons.history}
+              <strong>سجل التنفيذ</strong>
+              <small data-bulk-log-count>0</small>
+            </div>
+            <div class="bulk-log" data-bulk-log>
+              <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+            </div>
+
+            <p class="feature-note">${icons.shieldAlert}
+              يتم الإرسال كودًا بكود عبر نموذج الصفحة نفسه. التراجع بعد اكتمال الدفعة يلغي كل السجلات المُنشأة في خطوة واحدة. إذا اختلف رقم الحصة عن الحصة المفتوحة، يجب فتح الرابط الصحيح أولًا.
+            </p>
           </div>
         </div>
       </div>
@@ -485,6 +536,308 @@ export function mountShell(): void {
         toggleModal()
       }
     }
+  })
+
+  // ---- bulk attendance (M2) -----------------------------------------------
+  const bulkRoot = backdrop.querySelector<HTMLElement>('[data-bulk-root]')!
+  const bulkLessonInput = bulkRoot.querySelector<HTMLInputElement>('[data-bulk-lesson]')!
+  const bulkCodesInput = bulkRoot.querySelector<HTMLTextAreaElement>('[data-bulk-codes]')!
+  const bulkPreviewBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-preview]')!
+  const bulkArmBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-arm]')!
+  const bulkRunBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-run]')!
+  const bulkStopBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-stop]')!
+  const bulkPreviewBox = bulkRoot.querySelector<HTMLElement>('[data-bulk-preview-box]')!
+  const bulkLog = bulkRoot.querySelector<HTMLElement>('[data-bulk-log]')!
+  const bulkLogCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-log-count]')!
+  const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
+
+  let bulkPreviewData: BulkPreview | null = null
+  let bulkArmed = false
+  let bulkRunning = false
+  let bulkStop = { stop: false }
+  let bulkLessonTouched = false
+  let bulkLogRows: BulkRowResult[] = []
+
+  function bulkSupported(): boolean {
+    return isAttendancePage()
+  }
+
+  function setBulkBadge(text: string, className: string): void {
+    bulkBadge.textContent = text
+    bulkBadge.className = `feature-badge ${className}`
+  }
+
+  function escapeBulk(value: string): string {
+    return value.replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[char] ?? char)
+  }
+
+  function renderBulkLog(): void {
+    bulkLogCount.textContent = String(bulkLogRows.length)
+    if (!bulkLogRows.length) {
+      bulkLog.innerHTML = `<div class="history-empty">لا يوجد تنفيذ بعد.</div>`
+      return
+    }
+    bulkLog.innerHTML = bulkLogRows.slice().reverse().map((row) => {
+      const statusLabel: Record<BulkRowResult['status'], string> = {
+        created: 'تم التسجيل',
+        duplicate: 'موجود بالفعل',
+        'skipped-known': 'متخطى (مسجّل)',
+        timeout: 'انتهت المهلة',
+        error: 'خطأ',
+        stopped: 'متوقف',
+      }
+      const cls = row.status === 'created' ? 'ok'
+        : row.status === 'duplicate' || row.status === 'skipped-known' ? 'warn'
+        : 'err'
+      const detail = row.recordId ? ` · #${escapeBulk(row.recordId)}` : ''
+      const msg = row.message ? ` — ${escapeBulk(row.message)}` : ''
+      return `<div class="bulk-log-item ${cls}">
+        <span class="bulk-log-code">${escapeBulk(row.code)}</span>
+        <span class="bulk-log-status">${statusLabel[row.status]}${detail}${msg}</span>
+        <span class="bulk-log-time">${formatTime(row.at)}</span>
+      </div>`
+    }).join('')
+  }
+
+  function appendBulkRow(row: BulkRowResult): void {
+    bulkLogRows.push(row)
+    renderBulkLog()
+  }
+
+  function disarmBulk(reason?: string): void {
+    bulkArmed = false
+    if (reason) {
+      setBulkBadge(reason, 'off')
+    }
+  }
+
+  function updateBulkButtons(): void {
+    const supported = bulkSupported()
+    const canPreview = supported && !bulkRunning
+    const canArm = supported && !bulkRunning && !!bulkPreviewData && bulkPreviewData.toSubmit.length >= 0
+      && (bulkPreviewData.parse.codes.length > 0)
+    const canRun = supported && !bulkRunning && bulkArmed && !!bulkPreviewData
+      && bulkPreviewData.parse.codes.length > 0 && undoRedo.enabled
+
+    bulkPreviewBtn.disabled = !canPreview
+    bulkArmBtn.disabled = !canArm
+    bulkRunBtn.disabled = !canRun
+    bulkStopBtn.disabled = !bulkRunning
+
+    if (!supported) {
+      setBulkBadge('خارج صفحة الحضور', 'off')
+    } else if (bulkRunning) {
+      setBulkBadge('جارٍ التنفيذ', 'busy')
+    } else if (bulkArmed) {
+      setBulkBadge('مسلّح', 'on')
+    } else {
+      setBulkBadge('جاهز', 'off')
+    }
+  }
+
+  function refreshBulkLesson(force = false): void {
+    if (bulkLessonTouched && !force) return
+    const lessonId = currentLessonIdFromPage()
+    if (lessonId) bulkLessonInput.value = String(lessonId)
+  }
+
+  function showBulkPreview(): void {
+    if (!bulkSupported()) {
+      bulkPreviewData = null
+      bulkPreviewBox.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/attendance/scan</code> أولًا.</div>`
+      disarmBulk('غير متاح')
+      updateBulkButtons()
+      return
+    }
+
+    const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || null
+    const preview = buildPreview(bulkCodesInput.value, lessonId)
+    bulkPreviewData = preview
+    bulkArmed = false
+
+    const scan = detectScanForm()
+    if (!scan) {
+      bulkPreviewBox.innerHTML = `<div class="bulk-warn">تعذّر العثور على نموذج الحضور (<code>#scanForm</code>) أو حقل الإدخال. تأكد أنك في صفحة مسح الحضور الصحيحة.</div>`
+      updateBulkButtons()
+      return
+    }
+
+    const p = preview.parse
+    const parts: string[] = []
+    parts.push(`<div class="bulk-preview-grid">
+      <div><strong>الحصة المستهدفة</strong><span>${escapeHtml(preview.lessonId ?? 'غير محددة')}</span></div>
+      <div><strong>الحصة المفتوحة</strong><span>${escapeHtml(preview.pageLessonId ?? scan.lessonId ?? 'غير معروفة')}</span></div>
+      <div><strong>حقل الإدخال</strong><span dir="ltr">${escapeHtml(scan.inputSelector)}</span></div>
+      <div><strong>أكواد صالحة</strong><span>${p.codes.length}</span></div>
+      <div><strong>مكررة (أزيلت)</strong><span>${p.duplicates.length}</span></div>
+      <div><strong>غير صالحة (تُتجاهل)</strong><span>${p.invalid.length}</span></div>
+      <div><strong>مسجّلة مسبقًا</strong><span>${preview.alreadyPresent.length}</span></div>
+      <div><strong>ستُرسَل</strong><span>${preview.toSubmit.length}</span></div>
+    </div>`)
+
+    if (preview.pageLessonId && preview.lessonId && String(preview.lessonId) !== String(preview.pageLessonId)) {
+      parts.push(`<div class="bulk-warn">رقم الحصة المدخل (${escapeHtml(preview.lessonId)}) يختلف عن الحصة المفتوحة (${escapeHtml(preview.pageLessonId)}). افتح الحصة المطلوبة أولًا قبل التنفيذ.</div>`)
+    }
+
+    if (p.invalid.length) {
+      parts.push(`<div class="bulk-warn">قيم غير صالحة سيتم تجاهلها: ${p.invalid.slice(0, 12).map(escapeHtml).join('، ')}${p.invalid.length > 12 ? '…' : ''}</div>`)
+    }
+    if (preview.alreadyPresent.length) {
+      parts.push(`<div class="bulk-note-inline">أكواد مسجّلة مسبقًا (ستُتخطى): ${preview.alreadyPresent.slice(0, 12).map(escapeHtml).join('، ')}${preview.alreadyPresent.length > 12 ? '…' : ''}</div>`)
+    }
+    if (!p.codes.length) {
+      parts.push(`<div class="bulk-warn">لا توجد أكواد صالحة.</div>`)
+    }
+    if (!undoRedo.enabled) {
+      parts.push(`<div class="bulk-warn">ميزة التراجع متوقفة؛ فعّلها أولًا ليتم تسجيل الدفعة كتراجع واحد.</div>`)
+    }
+    parts.push(`<div class="bulk-note-inline">بدون بيان دفع، قد يُسجَّل الحضور كدفع مؤجل إذا كانت الحصة بتحصيل (سلوك المنصة).</div>`)
+
+    bulkPreviewBox.innerHTML = parts.join('')
+    updateBulkButtons()
+  }
+
+  function invalidateBulkPreview(): void {
+    if (bulkRunning) return
+    bulkPreviewData = null
+    bulkArmed = false
+    bulkPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة قبل التنفيذ.'
+    updateBulkButtons()
+  }
+
+  async function executeBulk(): Promise<void> {
+    if (bulkRunning || !bulkArmed || !bulkPreviewData) return
+    if (!bulkSupported()) return
+
+    const scan = detectScanForm()
+    if (!scan) {
+      toast({ title: 'تعذّر التنفيذ', description: 'لم يُعثر على نموذج الحضور.', variant: 'error' })
+      return
+    }
+
+    const targetLesson = bulkLessonInput.value.trim() || bulkPreviewData.lessonId || ''
+    const pageLesson = scan.lessonId ?? currentLessonIdFromPage() ?? ''
+    if (targetLesson && pageLesson && String(targetLesson) !== String(pageLesson)) {
+      toast({
+        title: 'الحصة غير متطابقة',
+        description: `افتح الحصة رقم ${targetLesson} أولًا ثم أعد المحاولة.`,
+        variant: 'warning',
+        duration: 7000,
+      })
+      return
+    }
+
+    const codes = bulkPreviewData.parse.codes
+    if (!codes.length) return
+    if (!undoRedo.enabled) {
+      toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء والتراجع معطل.', variant: 'warning' })
+      return
+    }
+
+    bulkRunning = true
+    bulkStop = { stop: false }
+    bulkLogRows = []
+    renderBulkLog()
+    disarmBulk()
+    updateBulkButtons()
+
+    undoRedo.beginBatch('تسجيل حضور جماعي')
+    try {
+      const summary = await runBulkAttendance({
+        codes,
+        signal: bulkStop,
+        onRow: appendBulkRow,
+      })
+
+      const committed = undoRedo.commitBatch({
+        title: `تسجيل حضور جماعي (${summary.created})`,
+        detail: `تم ${summary.created} · موجود ${summary.duplicates} · متخطى ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}`,
+      })
+
+      if (!committed && summary.created > 0) {
+        toast({
+          title: 'اكتمل التنفيذ بدون سجل تراجع',
+          description: 'لم يتم تسجيل الدفعة في سجل التراجع.',
+          variant: 'warning',
+          duration: 7000,
+        })
+      } else if (summary.created > 0) {
+        toast({
+          title: 'اكتمل التسجيل الجماعي',
+          description: `تم تسجيل ${summary.created} طالب. يمكن التراجع عن الدفعة كاملة بـ Ctrl+Z.`,
+          variant: 'applied',
+          duration: 7000,
+        })
+      } else if (summary.stopped && summary.failed > 0) {
+        toast({
+          title: 'توقف التنفيذ',
+          description: 'تحقق من السجل لمعرفة السبب.',
+          variant: 'warning',
+        })
+      } else {
+        toast({
+          title: 'لا توجد سجلات جديدة',
+          description: 'جميع الأكواد كانت مسجلة أو تم تخطيها.',
+          variant: 'info',
+        })
+      }
+
+      // Refresh preview so "already present" reflects new state.
+      bulkPreviewData = buildPreview(bulkCodesInput.value, bulkLessonInput.value.trim() || null)
+    } catch (error) {
+      undoRedo.commitBatch({
+        title: `تسجيل حضور جماعي (${undoRedo.batchCount})`,
+        detail: 'انتهى التنفيذ بخطأ',
+      })
+      toast({
+        title: 'حدث خطأ أثناء التنفيذ',
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      })
+    } finally {
+      bulkRunning = false
+      bulkStop.stop = false
+      updateBulkButtons()
+    }
+  }
+
+  bulkPreviewBtn.addEventListener('click', () => {
+    refreshBulkLesson()
+    showBulkPreview()
+  })
+  bulkArmBtn.addEventListener('click', () => {
+    if (!bulkPreviewData || !bulkPreviewData.parse.codes.length) {
+      showBulkPreview()
+      return
+    }
+    bulkArmed = true
+    setBulkBadge('مسلّح', 'on')
+    updateBulkButtons()
+    toast({
+      title: 'التنفيذ مسلّح',
+      description: 'اضغط تنفيذ للبدء. أي تعديل على الأكواد أو الحصة سيلغي التسليح.',
+      variant: 'warning',
+    })
+  })
+  bulkRunBtn.addEventListener('click', () => { void executeBulk() })
+  bulkStopBtn.addEventListener('click', () => {
+    if (!bulkRunning) return
+    bulkStop.stop = true
+    setBulkBadge('جارٍ الإيقاف', 'busy')
+    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف التنفيذ بعد الكود الحالي.', variant: 'warning' })
+  })
+
+  bulkCodesInput.addEventListener('input', () => { bulkLessonTouched = bulkLessonTouched; invalidateBulkPreview() })
+  bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkPreview() })
+
+  // Prefill lesson and keep bulk controls in sync with undoRedo state.
+  refreshBulkLesson()
+  updateBulkButtons()
+  undoRedo.subscribe(() => {
+    refreshBulkLesson()
+    updateBulkButtons()
   })
 
   GM_registerMenuCommand('Tamperina — معاينة الإشعار', () => {

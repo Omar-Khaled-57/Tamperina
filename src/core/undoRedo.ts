@@ -72,6 +72,8 @@ export interface UndoRedoDebug {
   path: string
   supported: boolean
   enabled: boolean
+  batching: boolean
+  batchCount: number
   canUndo: boolean
   canRedo: boolean
   historyCount: number
@@ -80,27 +82,42 @@ export interface UndoRedoDebug {
   observed: UndoRedoDebugObservation[]
 }
 
+export interface AttendanceEvent {
+  type: 'add' | 'remove' | 'duplicate'
+  record: LiveRecord
+}
+
 export interface UndoRedoController {
   readonly version: string
   readonly supported: boolean
   readonly enabled: boolean
   readonly busy: boolean
+  readonly batching: boolean
+  readonly batchCount: number
   readonly canUndo: boolean
   readonly canRedo: boolean
   readonly history: readonly HistoryAction[]
+  readonly knownRecordCodes: readonly string[]
+  readonly lessonId: string | null
   setEnabled(enabled: boolean): void
   undo(): Promise<void>
   redo(): Promise<void>
+  beginBatch(title: string): void
+  commitBatch(options?: { title?: string, detail?: string }): HistoryAction | null
   subscribe(listener: () => void): () => void
+  onAttendance(listener: (event: AttendanceEvent) => void): () => void
   debug(): UndoRedoDebug
 }
 
 const SUPPORTED_PATHS = new Set(['/attendance/scan', '/evaluation'])
 const ENABLED_KEY = 'tamperina.feature.undoRedo.enabled.v1'
-const CONTROLLER_VERSION = 'v2'
+const CONTROLLER_VERSION = 'v3'
 const CONTROLLER_KEY = `__tamperinaUndoRedoController_${CONTROLLER_VERSION}`
 const HOOKS_KEY = `__tamperinaUndoRedoHooks_${CONTROLLER_VERSION}`
-const LEGACY_CONTROLLER_KEYS = ['__tamperinaUndoRedoControllerV1']
+const LEGACY_CONTROLLER_KEYS = [
+  '__tamperinaUndoRedoControllerV1',
+  '__tamperinaUndoRedoController_v2',
+]
 
 const page = (unsafeWindow ?? window) as unknown as Window & Record<string, unknown>
 
@@ -441,6 +458,7 @@ function createController(): UndoRedoController {
   const past: HistoryAction[] = []
   const future: HistoryAction[] = []
   const listeners = new Set<() => void>()
+  const attendanceListeners = new Set<(event: AttendanceEvent) => void>()
   const records = new Map<string, LiveRecord>()
   const gradeBaselines = new Map<string, GradeSnapshot>()
   const observed: UndoRedoDebugObservation[] = []
@@ -451,11 +469,16 @@ function createController(): UndoRedoController {
   let sequence = 0
   let currentLessonId: string | null = null
   let nativeFetch: typeof fetch | null = null
+  let batch: { title: string, actions: HistoryAction[] } | null = null
 
   if (page.fetch && !nativeFetch) nativeFetch = page.fetch.bind(page)
 
   const notify = (): void => {
     for (const listener of listeners) listener()
+  }
+
+  const emitAttendance = (event: AttendanceEvent): void => {
+    for (const listener of attendanceListeners) listener(event)
   }
 
   const recordObservation = (
@@ -484,6 +507,7 @@ function createController(): UndoRedoController {
     sessionPath = path
     past.length = 0
     future.length = 0
+    batch = null
     records.clear()
     gradeBaselines.clear()
     lastTouchedGradeRow = null
@@ -765,7 +789,39 @@ function createController(): UndoRedoController {
     }
   }
 
+  function makeBatchAction(
+    title: string,
+    detail: string,
+    actions: HistoryAction[],
+  ): HistoryAction {
+    return {
+      id: nextId(),
+      title,
+      detail,
+      at: Date.now(),
+      undo: async () => {
+        const next: HistoryAction[] = new Array(actions.length)
+        for (let i = actions.length - 1; i >= 0; i--) {
+          next[i] = await actions[i].undo()
+        }
+        return makeBatchAction(title, detail, next)
+      },
+      redo: async () => {
+        const next: HistoryAction[] = new Array(actions.length)
+        for (let i = 0; i < actions.length; i++) {
+          next[i] = await actions[i].redo()
+        }
+        return makeBatchAction(title, detail, next)
+      },
+    }
+  }
+
   function pushAction(action: HistoryAction): void {
+    if (batch) {
+      batch.actions.push(action)
+      notify()
+      return
+    }
     past.push(action)
     future.length = 0
     notify()
@@ -810,10 +866,14 @@ function createController(): UndoRedoController {
     if (!record) return
 
     // Duplicate submissions return an existing record; nothing changed.
-    if (before.recordIds.has(record.id)) return
+    if (before.recordIds.has(record.id)) {
+      emitAttendance({ type: 'duplicate', record })
+      return
+    }
 
     cacheRecord(record)
     pushAction(makeAddedAction(record, before.headers))
+    emitAttendance({ type: 'add', record })
   }
 
   function handleAttendanceRemove(url: URL, before: BeforeSnapshot, json: unknown): void {
@@ -822,6 +882,7 @@ function createController(): UndoRedoController {
     if (!record) return
     forgetRecord(record.id)
     pushAction(makeRemovedAction(record, before.headers))
+    emitAttendance({ type: 'remove', record })
   }
 
   function observeResponse(
@@ -1043,9 +1104,20 @@ function createController(): UndoRedoController {
     get supported() { return isSupportedPage() },
     get enabled() { return enabled },
     get busy() { return busy },
+    get batching() { return batch !== null },
+    get batchCount() { return batch?.actions.length ?? 0 },
     get canUndo() { return past.length > 0 },
     get canRedo() { return future.length > 0 },
     get history() { return past.slice().reverse() },
+    get knownRecordCodes() {
+      const codes = new Set<string>()
+      for (const record of records.values()) {
+        const code = studentCode(record)
+        if (code) codes.add(code.toUpperCase())
+      }
+      return Array.from(codes)
+    },
+    get lessonId() { return currentLessonId },
     setEnabled(value: boolean) {
       if (enabled === value) return
       enabled = value
@@ -1059,9 +1131,34 @@ function createController(): UndoRedoController {
     },
     undo,
     redo,
+    beginBatch(title: string) {
+      if (batch) return
+      batch = { title, actions: [] }
+      notify()
+    },
+    commitBatch(options?: { title?: string, detail?: string }): HistoryAction | null {
+      if (!batch) return null
+      const actions = batch.actions.slice()
+      const title = options?.title ?? batch.title
+      batch = null
+      if (!actions.length) {
+        notify()
+        return null
+      }
+      const detail = options?.detail ?? `${actions.length} عملية`
+      const grouped = makeBatchAction(title, detail, actions)
+      past.push(grouped)
+      future.length = 0
+      notify()
+      return grouped
+    },
     subscribe(listener: () => void) {
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+    onAttendance(listener: (event: AttendanceEvent) => void) {
+      attendanceListeners.add(listener)
+      return () => attendanceListeners.delete(listener)
     },
     debug(): UndoRedoDebug {
       return {
@@ -1069,6 +1166,8 @@ function createController(): UndoRedoController {
         path: normalisePath(location.pathname),
         supported: isSupportedPage(),
         enabled,
+        batching: batch !== null,
+        batchCount: batch?.actions.length ?? 0,
         canUndo: past.length > 0,
         canRedo: future.length > 0,
         historyCount: past.length,

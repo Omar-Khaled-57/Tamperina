@@ -1,6 +1,7 @@
 /**
- * Feature registry. M0 kept this empty while the shell was being tuned.
- * M1 adds the first real toggle: reversible attendance actions.
+ * Feature registry.
+ * M1: reversible attendance/grading actions.
+ * M2: bulk attendance entry via the scan form.
  */
 export interface Feature {
   id: string
@@ -13,7 +14,13 @@ export const registeredFeatures: Feature[] = [
   {
     id: 'undo-redo',
     label: 'التراجع وإعادة التنفيذ',
-    description: 'Ctrl+Z / Ctrl+Y لعمليات الحضور والتقييم',
+    description: 'Ctrl+Z / Ctrl+Y لعمليات الحضور والتقييم (يدعم الإلغاء الجماعي)',
+    defaultEnabled: true,
+  },
+  {
+    id: 'bulk-attendance',
+    label: 'تسجيل الحضور الجماعي',
+    description: 'إدخال قائمة أكواد في صفحة الحضور مع معاينة وتسليح وتراجع دفعة واحدة',
     defaultEnabled: true,
   },
 ]

@@ -6,7 +6,9 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 ## Status
 
-**M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused. The full plan lives in `dev/PLAN.md` (gitignored).
+**M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused.
+
+**M2 — Bulk attendance.** On `/attendance/scan`, the **الجماعي** tab accepts a list of student codes (one per line) and enters them by driving the page's existing scan form in a loop — no native bulk endpoint and no voice widget. The flow is **معاينة** (no writes) → **تسليح التنفيذ** → **تنفيذ**, with a stop button between codes. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. The full plan lives in `dev/PLAN.md` (gitignored).
 
 ## Build
 
@@ -51,16 +53,33 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 | Drag the mascot | Move it anywhere (position saved as % of viewport) |
 | Click the mascot | Open the options modal (Toggles / Bulk tabs) |
 | `Alt+Shift+T` | Open the modal, or restore the mascot after click-through |
-| `Ctrl+Z` / `⌘+Z` | Undo the last recorded attendance or grading action |
+| `Ctrl+Z` / `⌘+Z` | Undo the last recorded attendance, grading, or bulk-batch action |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo the last undone action |
 | Focused input on `/attendance/scan` | Undo/redo shortcuts still run Tamperina instead of the browser's text undo |
 | `Esc` / backdrop click | Close the modal |
 
 Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History lives only in the current page session and is intentionally cleared on reload.
 
+### Bulk attendance
+
+On `/attendance/scan` (including `?lesson_id=...` links), open **الجماعي**:
+
+1. Paste **codes only** — one per line. Tamperina normalizes Arabic/Persian digits, uppercases, splits on commas/`و`/newlines, removes duplicates, and ignores invalid tokens.
+2. Confirm the lesson id (prefilled from the open page). If you change it to a different lesson, open that lesson's scan page first.
+3. Click **معاينة** to see what will happen (no writes), then **تسليح التنفيذ**, then **تنفيذ**.
+
+Tamperina fills the scan input and submits one code at a time, waits for server confirmation, and logs each result. **إيقاف** stops between codes. Undo/Redo must be enabled so the run is recorded as one reversible batch.
+
+Suggested prompt for transcribing handwriting:
+
+```text
+استخرج أكواد الطلاب فقط من القائمة المكتوبة يدويًا. اكتب كودًا واحدًا في كل سطر، بالأرقام اللاتينية، بدون أسماء أو شرح أو ترقيم.
+```
+
 When click-through is on, Tamperina stays visible as a faint ghost and a small pin sits on its corner to restore it. Tampermonkey's menu also has restore/open commands, plus **تشخيص التراجع**, which prints the last observed write requests to the browser console and toasts a short summary. If grading undo does not register, that diagnostic shows whether the request was seen and why it was skipped.
 
 ## Notes
 
 - No credentials are stored or used. The script runs inside your existing logged-in session.
+- Bulk attendance does not use a separate native bulk API or the platform voice widget; it automates the same single-student scan flow you would do manually.
 - `dev/` and `node_modules/` are gitignored; `dist/` is tracked because it is the install artifact.
