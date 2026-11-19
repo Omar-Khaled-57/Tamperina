@@ -19,8 +19,8 @@ export const registeredFeatures: Feature[] = [
   },
   {
     id: 'bulk-attendance',
-    label: 'تسجيل الحضور الجماعي',
-    description: 'إدخال قائمة أكواد في صفحة الحضور مع معاينة وتسليح وتراجع دفعة واحدة',
+    label: 'الإجراءات الجماعية',
+    description: 'حضور جماعي (أكواد/أسماء) مع تحليل وتسليح وتراجع دفعة واحدة، مع بنود جماعية أخرى',
     defaultEnabled: true,
   },
 ]

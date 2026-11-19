@@ -6,13 +6,15 @@ import { icons } from '../icons'
 import { attachToaster, toast } from './toast'
 import { getUndoRedoController, type UndoRedoController } from './undoRedo'
 import {
-  buildPreview,
   currentLessonIdFromPage,
   detectScanForm,
-  parseBulkCodes,
+  formatCandidate,
+  parseBulkEntries,
+  resolveNameEntry,
   runBulkAttendance,
-  type BulkPreview,
   type BulkRowResult,
+  type NameRow,
+  type ParseEntriesResult,
 } from './bulkAttendance'
 import {
   loadShell,
@@ -24,9 +26,9 @@ import {
 } from './storage'
 
 const HOST_ID = 'tamperina-root'
-const FONT_STYLE_ID = 'tamperina-font-face'
 const DRAG_THRESHOLD = 5
 const HOTKEY_RESTORE = 'Alt+Shift+T'
+let cairoFontReady = false
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -68,18 +70,35 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 }
 
-/** Chrome/Firefox ignore @font-face rules scoped to a Shadow DOM stylesheet. */
+/**
+ * Register the bundled font bytes directly instead of using data URL
+ * @font-face rules. The host CSP may forbid data URL font sources.
+ */
 function ensureCairoFont(): void {
-  if (document.getElementById(FONT_STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = FONT_STYLE_ID
-  style.textContent = cairoFontCss
-  const target = document.head ?? document.documentElement
-  if (!target) {
-    document.addEventListener('DOMContentLoaded', ensureCairoFont, { once: true })
-    return
-  }
-  target.appendChild(style)
+  if (cairoFontReady || !('FontFace' in window)) return
+  cairoFontReady = true
+
+  const faces = cairoFontCss.matchAll(
+    /@font-face\{[^}]*font-family:'Cairo';font-style:([^;]+);font-weight:([^;]+);font-display:[^;]+;src:url\(data:font\/woff2;base64,([^)]*)\)[^;]*;unicode-range:([^}]+)\}/g,
+  )
+
+  void Promise.all(Array.from(faces, async ([, style, weight, base64, unicodeRange]) => {
+    const binary = atob(base64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+
+    const buffer = new ArrayBuffer(bytes.length)
+    new Uint8Array(buffer).set(bytes)
+    const face = new FontFace('Cairo', buffer, {
+      style,
+      weight,
+      unicodeRange: unicodeRange.replace(/;$/, ''),
+    })
+    await face.load()
+    document.fonts.add(face)
+  })).catch(() => {
+    cairoFontReady = false
+  })
 }
 
 export function mountShell(): void {
@@ -92,9 +111,6 @@ export function mountShell(): void {
 
   const shadow = host.attachShadow({ mode: 'open' })
   attachToaster(shadow)
-  const fontStyle = document.createElement('style')
-  fontStyle.textContent = cairoFontCss
-  shadow.appendChild(fontStyle)
   shadow.appendChild(shellStyle.cloneNode(true))
 
   const shellEl = document.createElement('div')
@@ -149,53 +165,98 @@ export function mountShell(): void {
           <div data-feature-list class="feature-list"></div>
         </div>
         <div data-panel="bulk" hidden>
-          <div class="bulk-card" data-bulk-root>
-            <div class="bulk-head">
-              <span class="feature-icon">${icons.bulk}</span>
-              <span class="feature-titles">
-                <strong>تسجيل حضور جماعي</strong>
-                <small>إدخال أكواد عبر نموذج الحضور</small>
-              </span>
-              <span class="feature-badge off" data-bulk-state-badge>جاهز</span>
+          <div class="bulk-menu" data-bulk-view="menu">
+            <div class="bulk-menu-list">
+              <button type="button" class="bulk-item" data-bulk-open="attendance">
+                <span class="feature-icon">${icons.bulk}</span>
+                <span class="bulk-item-text">
+                  <strong>تسجيل حضور جماعي</strong>
+                  <small>إدخال قائمة طلاب في صفحة الحضور مع معاينة وتسليح وتراجع دفعة واحدة</small>
+                </span>
+                <span class="feature-badge on">متاح</span>
+              </button>
+
+              <button type="button" class="bulk-item" data-bulk-open="evaluation">
+                <span class="feature-icon">${icons.toggles}</span>
+                <span class="bulk-item-text">
+                  <strong>تقييم جماعي</strong>
+                  <small>إجراءات تقييم جماعية — سيتم تحديدها بعد التقاط سير العمل</small>
+                </span>
+                <span class="feature-badge off">قريبًا</span>
+              </button>
+
+              <div class="bulk-item is-soon" aria-disabled="true">
+                <span class="feature-icon">${icons.history}</span>
+                <span class="bulk-item-text">
+                  <strong>إجراء جماعي آخر</strong>
+                  <small>مساحة لإجراءات جماعية إضافية سيتم تصميمها لاحقًا</small>
+                </span>
+                <span class="feature-badge off">قريبًا</span>
+              </div>
             </div>
+          </div>
 
-            <p class="bulk-note">
-              الصق الأكواد فقط (كود واحد في كل سطر). لا تُكتب الأسماء. تنسيق مقترح للذكاء الاصطناعي: «استخرج أكواد الطلاب فقط، كودًا واحدًا في كل سطر بالأرقام اللاتينية بدون أسماء أو شرح».
-            </p>
+          <div class="bulk-detail" data-bulk-view="attendance" hidden>
+            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <div class="bulk-card" data-bulk-root>
+              <div class="bulk-head">
+                <span class="feature-icon">${icons.bulk}</span>
+                <span class="feature-titles">
+                  <strong>تسجيل حضور جماعي</strong>
+                  <small>إدخال عبر نموذج الحضور (أكواد أو أسماء)</small>
+                </span>
+                <span class="feature-badge off" data-bulk-state-badge>جاهز</span>
+              </div>
 
-            <div class="bulk-grid">
+              <p class="bulk-note">
+                اكتب كل طالب في سطر مستقل: كود الطالب أو اسمه. إذا تعذّر العثور على الاسم أو كان غامضًا/مشتركًا، ستظهر لك خيارات: اختيار الطالب الصحيح، تعديل الاسم، أو تجاهله لإدخاله يدويًا.
+              </p>
+
+              <div class="bulk-grid">
+                <label class="bulk-field">
+                  <span>رقم الحصة (الحالية افتراضيًا)</span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-bulk-lesson placeholder="مثال: 293" />
+                </label>
+              </div>
+
               <label class="bulk-field">
-                <span>رقم الحصة (الحالية افتراضيًا)</span>
-                <input type="text" inputmode="numeric" class="bulk-input" data-bulk-lesson placeholder="مثال: 293" />
+                <span>قائمة الطلاب (كود أو اسم في كل سطر)</span>
+                <textarea class="bulk-textarea" data-bulk-codes rows="7" placeholder="2349&#10;أحمد محمد&#10;2351"></textarea>
               </label>
+
+              <div class="bulk-actions">
+                <button type="button" class="action-btn" data-bulk-preview>${icons.toggles}<span>معاينة وتحليل</span></button>
+                <button type="button" class="action-btn" data-bulk-arm disabled>${icons.lock}<span>تسليح التنفيذ</span></button>
+                <button type="button" class="action-btn bulk-run" data-bulk-run disabled>${icons.play}<span>تنفيذ</span></button>
+                <button type="button" class="action-btn bulk-stop" data-bulk-stop disabled>${icons.pause}<span>إيقاف</span></button>
+              </div>
+
+              <div class="bulk-preview" data-bulk-preview-box>لم تتم المعاينة بعد.</div>
+              <div class="bulk-resolve" data-bulk-resolve hidden></div>
+
+              <div class="history-head">
+                ${icons.history}
+                <strong>سجل التنفيذ</strong>
+                <small data-bulk-log-count>0</small>
+              </div>
+              <div class="bulk-log" data-bulk-log>
+                <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+              </div>
+
+              <p class="feature-note">${icons.shieldAlert}
+                يتم الإرسال طالبًا بطالب عبر نموذج الصفحة نفسه. التراجع بعد اكتمال الدفعة يلغي كل السجلات المُنشأة في خطوة واحدة. إذا اختلف رقم الحصة عن الحصة المفتوحة، يجب فتح الرابط الصحيح أولًا.
+              </p>
             </div>
+          </div>
 
-            <label class="bulk-field">
-              <span>قائمة الأكواد</span>
-              <textarea class="bulk-textarea" data-bulk-codes rows="7" placeholder="2349&#10;2350&#10;2351"></textarea>
-            </label>
-
-            <div class="bulk-actions">
-              <button type="button" class="action-btn" data-bulk-preview>${icons.toggles}<span>معاينة</span></button>
-              <button type="button" class="action-btn" data-bulk-arm disabled>${icons.lock}<span>تسليح التنفيذ</span></button>
-              <button type="button" class="action-btn bulk-run" data-bulk-run disabled>${icons.play}<span>تنفيذ</span></button>
-              <button type="button" class="action-btn bulk-stop" data-bulk-stop disabled>${icons.pause}<span>إيقاف</span></button>
+          <div class="bulk-detail" data-bulk-view="evaluation" hidden>
+            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <div class="empty">
+              ${icons.toggles}
+              <strong>التقييم الجماعي — قريبًا</strong>
+              <p>سيُضاف بعد تحديد الإجراءات المطلوبة (درجات، عبارات جاهزة، أو غيرها) والتقاط سير العمل الفعلي في صفحة التقييم.</p>
+              <span class="locked-note">${icons.lock} قيد التجهيز</span>
             </div>
-
-            <div class="bulk-preview" data-bulk-preview-box>لم تتم المعاينة بعد.</div>
-
-            <div class="history-head">
-              ${icons.history}
-              <strong>سجل التنفيذ</strong>
-              <small data-bulk-log-count>0</small>
-            </div>
-            <div class="bulk-log" data-bulk-log>
-              <div class="history-empty">لا يوجد تنفيذ بعد.</div>
-            </div>
-
-            <p class="feature-note">${icons.shieldAlert}
-              يتم الإرسال كودًا بكود عبر نموذج الصفحة نفسه. التراجع بعد اكتمال الدفعة يلغي كل السجلات المُنشأة في خطوة واحدة. إذا اختلف رقم الحصة عن الحصة المفتوحة، يجب فتح الرابط الصحيح أولًا.
-            </p>
           </div>
         </div>
       </div>
@@ -547,16 +608,20 @@ export function mountShell(): void {
   const bulkRunBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-run]')!
   const bulkStopBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-stop]')!
   const bulkPreviewBox = bulkRoot.querySelector<HTMLElement>('[data-bulk-preview-box]')!
+  const bulkResolveBox = bulkRoot.querySelector<HTMLElement>('[data-bulk-resolve]')!
   const bulkLog = bulkRoot.querySelector<HTMLElement>('[data-bulk-log]')!
   const bulkLogCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-log-count]')!
   const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
 
-  let bulkPreviewData: BulkPreview | null = null
+  let bulkParsed: ParseEntriesResult | null = null
+  let bulkNameRows: NameRow[] = []
   let bulkArmed = false
   let bulkRunning = false
+  let bulkResolving = false
   let bulkStop = { stop: false }
   let bulkLessonTouched = false
   let bulkLogRows: BulkRowResult[] = []
+  let bulkAnalysisToken = 0
 
   function bulkSupported(): boolean {
     return isAttendancePage()
@@ -591,11 +656,12 @@ export function mountShell(): void {
       const cls = row.status === 'created' ? 'ok'
         : row.status === 'duplicate' || row.status === 'skipped-known' ? 'warn'
         : 'err'
+      const label = row.label ? `${escapeBulk(row.label)} · ` : ''
       const detail = row.recordId ? ` · #${escapeBulk(row.recordId)}` : ''
       const msg = row.message ? ` — ${escapeBulk(row.message)}` : ''
       return `<div class="bulk-log-item ${cls}">
-        <span class="bulk-log-code">${escapeBulk(row.code)}</span>
-        <span class="bulk-log-status">${statusLabel[row.status]}${detail}${msg}</span>
+        <span class="bulk-log-code" title="${escapeBulk(label)}${escapeBulk(row.code)}">${escapeBulk(row.code)}</span>
+        <span class="bulk-log-status">${label}${statusLabel[row.status]}${detail}${msg}</span>
         <span class="bulk-log-time">${formatTime(row.at)}</span>
       </div>`
     }).join('')
@@ -608,18 +674,106 @@ export function mountShell(): void {
 
   function disarmBulk(reason?: string): void {
     bulkArmed = false
-    if (reason) {
-      setBulkBadge(reason, 'off')
+    if (reason) setBulkBadge(reason, 'off')
+  }
+
+  function executableEntries(): Array<{ code: string, label?: string }> {
+    if (!bulkParsed) return []
+    const result: Array<{ code: string, label?: string }> = []
+    for (const item of bulkParsed.codes) result.push({ code: item.code, label: item.raw })
+    for (const row of bulkNameRows) {
+      if (row.status === 'dropped') continue
+      if (row.status === 'resolved' && row.code) {
+        result.push({ code: row.code.toUpperCase(), label: row.studentName ?? row.query })
+      }
     }
+    return result
+  }
+
+  function unresolvedNameRows(): NameRow[] {
+    return bulkNameRows.filter((row) =>
+      row.status !== 'resolved' && row.status !== 'dropped')
+  }
+
+  function readyToArm(): boolean {
+    if (!bulkParsed) return false
+    if (bulkResolving) return false
+    const exec = executableEntries()
+    if (!exec.length) return false
+    if (unresolvedNameRows().length) return false
+    return true
+  }
+
+  function renderBulkResolve(): void {
+    const rows = bulkNameRows
+    if (!rows.length) {
+      bulkResolveBox.hidden = true
+      bulkResolveBox.innerHTML = ''
+      return
+    }
+
+    bulkResolveBox.hidden = false
+    bulkResolveBox.innerHTML = rows.map((row) => {
+      const statusText: Record<NameRow['status'], string> = {
+        ready: 'جاهز',
+        resolved: row.studentName ? `تم التعرف: ${row.studentName}${row.code ? ` (${row.code})` : ''}` : 'تم التعرف',
+        ambiguous: 'الاسم غامض أو مشترك — اختر الطالب الصحيح',
+        'not-found': 'لم يتم العثور على الاسم',
+        'too-many': 'نتائج كثيرة جدًا',
+        dropped: 'تم التجاهل — ستدخله يدويًا',
+        loading: 'جارٍ البحث…',
+        error: 'تعذّر البحث',
+      }
+      const cls = row.status === 'resolved' ? 'ok'
+        : row.status === 'dropped' ? 'drop'
+        : row.status === 'loading' ? ''
+        : (row.status === 'ready' ? 'ok' : '')
+
+      let choicesHtml = ''
+      if ((row.status === 'ambiguous' || row.status === 'not-found' || row.status === 'too-many' || row.status === 'error' || row.status === 'resolved')
+        && row.candidates.length) {
+        const list = row.candidates.slice(0, 12)
+        choicesHtml = `<div class="bulk-resolve-choices">${list.map((c) => `
+          <button type="button" class="bulk-choice ${row.code === c.code && row.status === 'resolved' ? 'selected' : ''}"
+            data-resolve-action="choose" data-key="${escapeBulk(row.key)}"
+            data-id="${escapeBulk(c.id)}" data-code="${escapeBulk(c.code)}" data-name="${escapeBulk(c.name)}">
+            <span>${escapeBulk(c.name || 'طالب')}</span>
+            <small>${escapeBulk(c.code || 'بدون كود')}</small>
+          </button>`).join('')}${row.candidates.length > 12 ? `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>` : ''}</div>`
+      }
+
+      const editHtml = row.status === 'dropped' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
+          <input type="text" class="bulk-input" data-resolve-edit="${escapeBulk(row.key)}" value="${escapeBulk(row.query)}" placeholder="عدّل الاسم ثم أعد البحث" />
+          <button type="button" class="bulk-mini-btn" data-resolve-action="research" data-key="${escapeBulk(row.key)}">إعادة بحث</button>
+        </div>`
+
+      const actions = row.status === 'dropped'
+        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-resolve-action="undrop" data-key="${escapeBulk(row.key)}">استرجاع</button></div>`
+        : `<div class="bulk-resolve-actions">
+            ${row.status === 'resolved' ? `<button type="button" class="bulk-mini-btn" data-resolve-action="change" data-key="${escapeBulk(row.key)}">تغيير</button>` : ''}
+            <button type="button" class="bulk-mini-btn" data-resolve-action="drop" data-key="${escapeBulk(row.key)}">تجاهل (يدويًا)</button>
+          </div>`
+
+      const reason = row.message && row.status !== 'resolved' ? `<div class="bulk-resolve-reason">${escapeBulk(row.message)}</div>` : ''
+
+      return `<div class="bulk-resolve-item ${cls}" data-resolve-key="${escapeBulk(row.key)}">
+        <div class="bulk-resolve-head">
+          <span class="bulk-resolve-name">${escapeBulk(row.raw)}</span>
+          <span class="feature-badge ${row.status === 'resolved' ? 'on' : row.status === 'dropped' ? 'off' : 'busy'}">${escapeBulk(statusText[row.status])}</span>
+        </div>
+        ${reason}
+        ${choicesHtml}
+        ${row.status === 'loading' ? '' : editHtml}
+        ${row.status === 'loading' ? '' : actions}
+      </div>`
+    }).join('')
   }
 
   function updateBulkButtons(): void {
     const supported = bulkSupported()
     const canPreview = supported && !bulkRunning
-    const canArm = supported && !bulkRunning && !!bulkPreviewData && bulkPreviewData.toSubmit.length >= 0
-      && (bulkPreviewData.parse.codes.length > 0)
-    const canRun = supported && !bulkRunning && bulkArmed && !!bulkPreviewData
-      && bulkPreviewData.parse.codes.length > 0 && undoRedo.enabled
+    const canArm = supported && !bulkRunning && readyToArm()
+    const canRun = supported && !bulkRunning && bulkArmed && readyToArm() && undoRedo.enabled
 
     bulkPreviewBtn.disabled = !canPreview
     bulkArmBtn.disabled = !canArm
@@ -630,8 +784,12 @@ export function mountShell(): void {
       setBulkBadge('خارج صفحة الحضور', 'off')
     } else if (bulkRunning) {
       setBulkBadge('جارٍ التنفيذ', 'busy')
+    } else if (bulkResolving) {
+      setBulkBadge('جارٍ التحليل', 'busy')
     } else if (bulkArmed) {
       setBulkBadge('مسلّح', 'on')
+    } else if (unresolvedNameRows().length) {
+      setBulkBadge('يتطلب قرارًا', 'busy')
     } else {
       setBulkBadge('جاهز', 'off')
     }
@@ -643,72 +801,146 @@ export function mountShell(): void {
     if (lessonId) bulkLessonInput.value = String(lessonId)
   }
 
-  function showBulkPreview(): void {
-    if (!bulkSupported()) {
-      bulkPreviewData = null
-      bulkPreviewBox.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/attendance/scan</code> أولًا.</div>`
-      disarmBulk('غير متاح')
-      updateBulkButtons()
+  function renderBulkAnalysisSummary(): void {
+    if (!bulkParsed) {
+      bulkPreviewBox.textContent = 'لم تتم المعاينة بعد.'
       return
     }
 
-    const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || null
-    const preview = buildPreview(bulkCodesInput.value, lessonId)
-    bulkPreviewData = preview
-    bulkArmed = false
+    if (!bulkSupported()) {
+      bulkPreviewBox.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/attendance/scan</code> أولًا.</div>`
+      return
+    }
 
     const scan = detectScanForm()
-    if (!scan) {
-      bulkPreviewBox.innerHTML = `<div class="bulk-warn">تعذّر العثور على نموذج الحضور (<code>#scanForm</code>) أو حقل الإدخال. تأكد أنك في صفحة مسح الحضور الصحيحة.</div>`
-      updateBulkButtons()
-      return
-    }
+    const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || null
+    const pageLessonId = scan?.lessonId ?? currentLessonIdFromPage() ?? null
+    const exec = executableEntries()
+    const unresolved = unresolvedNameRows()
+    const dropped = bulkNameRows.filter((r) => r.status === 'dropped').length
+    const resolvedNames = bulkNameRows.filter((r) => r.status === 'resolved').length
 
-    const p = preview.parse
     const parts: string[] = []
     parts.push(`<div class="bulk-preview-grid">
-      <div><strong>الحصة المستهدفة</strong><span>${escapeHtml(preview.lessonId ?? 'غير محددة')}</span></div>
-      <div><strong>الحصة المفتوحة</strong><span>${escapeHtml(preview.pageLessonId ?? scan.lessonId ?? 'غير معروفة')}</span></div>
-      <div><strong>حقل الإدخال</strong><span dir="ltr">${escapeHtml(scan.inputSelector)}</span></div>
-      <div><strong>أكواد صالحة</strong><span>${p.codes.length}</span></div>
-      <div><strong>مكررة (أزيلت)</strong><span>${p.duplicates.length}</span></div>
-      <div><strong>غير صالحة (تُتجاهل)</strong><span>${p.invalid.length}</span></div>
-      <div><strong>مسجّلة مسبقًا</strong><span>${preview.alreadyPresent.length}</span></div>
-      <div><strong>ستُرسَل</strong><span>${preview.toSubmit.length}</span></div>
+      <div><strong>الحصة المستهدفة</strong><span>${escapeHtml(lessonId ?? 'غير محددة')}</span></div>
+      <div><strong>الحصة المفتوحة</strong><span>${escapeHtml(pageLessonId ?? 'غير معروفة')}</span></div>
+      <div><strong>حقل الإدخال</strong><span dir="ltr">${escapeHtml(scan?.inputSelector ?? 'غير معروف')}</span></div>
+      <div><strong>أكواد مباشرة</strong><span>${bulkParsed.codes.length}</span></div>
+      <div><strong>أسماء (تم التعرف)</strong><span>${resolvedNames}/${bulkParsed.names.length}</span></div>
+      <div><strong>تحتاج قرارًا</strong><span>${unresolved.length}</span></div>
+      <div><strong>تم تجاهلها</strong><span>${dropped}</span></div>
+      <div><strong>جاهزة للإرسال</strong><span>${exec.length}</span></div>
+      <div><strong>مكررة</strong><span>${bulkParsed.duplicates.length}</span></div>
+      <div><strong>غير صالحة</strong><span>${bulkParsed.invalid.length}</span></div>
     </div>`)
 
-    if (preview.pageLessonId && preview.lessonId && String(preview.lessonId) !== String(preview.pageLessonId)) {
-      parts.push(`<div class="bulk-warn">رقم الحصة المدخل (${escapeHtml(preview.lessonId)}) يختلف عن الحصة المفتوحة (${escapeHtml(preview.pageLessonId)}). افتح الحصة المطلوبة أولًا قبل التنفيذ.</div>`)
+    if (!scan) {
+      parts.push(`<div class="bulk-warn">تعذّر العثور على نموذج الحضور أو حقل الإدخال.</div>`)
     }
-
-    if (p.invalid.length) {
-      parts.push(`<div class="bulk-warn">قيم غير صالحة سيتم تجاهلها: ${p.invalid.slice(0, 12).map(escapeHtml).join('، ')}${p.invalid.length > 12 ? '…' : ''}</div>`)
+    if (pageLessonId && lessonId && String(lessonId) !== String(pageLessonId)) {
+      parts.push(`<div class="bulk-warn">رقم الحصة المدخل (${escapeHtml(lessonId)}) يختلف عن الحصة المفتوحة (${escapeHtml(pageLessonId)}). افتح الحصة المطلوبة أولًا قبل التنفيذ.</div>`)
     }
-    if (preview.alreadyPresent.length) {
-      parts.push(`<div class="bulk-note-inline">أكواد مسجّلة مسبقًا (ستُتخطى): ${preview.alreadyPresent.slice(0, 12).map(escapeHtml).join('، ')}${preview.alreadyPresent.length > 12 ? '…' : ''}</div>`)
+    if (bulkParsed.invalid.length) {
+      parts.push(`<div class="bulk-warn">قيم غير صالحة سيتم تجاهلها: ${bulkParsed.invalid.slice(0, 12).map(escapeHtml).join('، ')}${bulkParsed.invalid.length > 12 ? '…' : ''}</div>`)
     }
-    if (!p.codes.length) {
-      parts.push(`<div class="bulk-warn">لا توجد أكواد صالحة.</div>`)
+    if (bulkParsed.duplicates.length) {
+      parts.push(`<div class="bulk-note-inline">أكواد مكررة أُزيلت: ${bulkParsed.duplicates.slice(0, 12).map(escapeHtml).join('، ')}${bulkParsed.duplicates.length > 12 ? '…' : ''}</div>`)
+    }
+    if (unresolved.length) {
+      parts.push(`<div class="bulk-warn">يوجد ${unresolved.length} اسم يحتاج قرارًا (اختيار/تعديل/تجاهل) قبل التسليح.</div>`)
     }
     if (!undoRedo.enabled) {
       parts.push(`<div class="bulk-warn">ميزة التراجع متوقفة؛ فعّلها أولًا ليتم تسجيل الدفعة كتراجع واحد.</div>`)
     }
-    parts.push(`<div class="bulk-note-inline">بدون بيان دفع، قد يُسجَّل الحضور كدفع مؤجل إذا كانت الحصة بتحصيل (سلوك المنصة).</div>`)
+    if (!exec.length && !bulkResolving) {
+      parts.push(`<div class="bulk-warn">لا توجد عناصر جاهزة للإرسال.</div>`)
+    }
+    parts.push(`<div class="bulk-note-inline">يتم مطابقة الأسماء ضمن طلاب الحصة المفتوحة. بدون بيان دفع قد يُسجَّل الحضور كدفع مؤجل إذا كانت الحصة بتحصيل (سلوك المنصة).</div>`)
 
     bulkPreviewBox.innerHTML = parts.join('')
+  }
+
+  function renderBulkAnalysis(): void {
+    renderBulkAnalysisSummary()
+    renderBulkResolve()
     updateBulkButtons()
   }
 
-  function invalidateBulkPreview(): void {
+  function invalidateBulkAnalysis(): void {
     if (bulkRunning) return
-    bulkPreviewData = null
+    bulkAnalysisToken++
+    bulkResolving = false
+    bulkParsed = null
+    bulkNameRows = []
     bulkArmed = false
-    bulkPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة قبل التنفيذ.'
+    bulkPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة والتحليل قبل التنفيذ.'
+    bulkResolveBox.hidden = true
+    bulkResolveBox.innerHTML = ''
     updateBulkButtons()
+  }
+
+  async function analyzeBulkInput(): Promise<void> {
+    if (!bulkSupported()) {
+      bulkParsed = null
+      bulkNameRows = []
+      renderBulkAnalysis()
+      disarmBulk('غير متاح')
+      return
+    }
+
+    const token = ++bulkAnalysisToken
+    const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
+    bulkParsed = parseBulkEntries(bulkCodesInput.value)
+    bulkNameRows = bulkParsed.names.map((entry) => ({
+      kind: 'name',
+      key: entry.key,
+      raw: entry.raw,
+      query: entry.query,
+      status: lessonId ? 'loading' : 'error',
+      candidates: [],
+      message: lessonId ? 'جارٍ البحث…' : 'حدد رقم الحصة أولًا.',
+    }))
+    bulkArmed = false
+    bulkResolving = bulkNameRows.length > 0 && !!lessonId
+    renderBulkAnalysis()
+
+    if (!lessonId) {
+      bulkResolving = false
+      renderBulkAnalysis()
+      return
+    }
+
+    for (let i = 0; i < bulkNameRows.length; i++) {
+      if (token !== bulkAnalysisToken) return
+      const current = bulkNameRows[i]
+      const resolved = await resolveNameEntry(current, lessonId)
+      if (token !== bulkAnalysisToken) return
+      bulkNameRows[i] = resolved
+      renderBulkAnalysis()
+    }
+
+    if (token !== bulkAnalysisToken) return
+    bulkResolving = false
+    renderBulkAnalysis()
+  }
+
+  async function reResolveNameRow(key: string, nextQuery: string): Promise<void> {
+    const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
+    if (!lessonId) return
+    const index = bulkNameRows.findIndex((row) => row.key === key)
+    if (index < 0) return
+    const token = ++bulkAnalysisToken
+    bulkArmed = false
+    bulkNameRows[index] = { ...bulkNameRows[index], query: nextQuery.trim() || bulkNameRows[index].query, status: 'loading', message: 'جارٍ البحث…' }
+    renderBulkAnalysis()
+    const resolved = await resolveNameEntry(bulkNameRows[index], lessonId)
+    if (token !== bulkAnalysisToken) return
+    bulkNameRows[index] = resolved
+    renderBulkAnalysis()
   }
 
   async function executeBulk(): Promise<void> {
-    if (bulkRunning || !bulkArmed || !bulkPreviewData) return
+    if (bulkRunning || !bulkArmed || !bulkParsed) return
     if (!bulkSupported()) return
 
     const scan = detectScanForm()
@@ -717,7 +949,7 @@ export function mountShell(): void {
       return
     }
 
-    const targetLesson = bulkLessonInput.value.trim() || bulkPreviewData.lessonId || ''
+    const targetLesson = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
     const pageLesson = scan.lessonId ?? currentLessonIdFromPage() ?? ''
     if (targetLesson && pageLesson && String(targetLesson) !== String(pageLesson)) {
       toast({
@@ -729,8 +961,13 @@ export function mountShell(): void {
       return
     }
 
-    const codes = bulkPreviewData.parse.codes
-    if (!codes.length) return
+    if (unresolvedNameRows().length) {
+      toast({ title: 'يوجد أسماء غير محلولة', description: 'اختر الطالب الصحيح أو عدّل الاسم أو تجاهله.', variant: 'warning' })
+      return
+    }
+
+    const entries = executableEntries()
+    if (!entries.length) return
     if (!undoRedo.enabled) {
       toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء والتراجع معطل.', variant: 'warning' })
       return
@@ -746,7 +983,7 @@ export function mountShell(): void {
     undoRedo.beginBatch('تسجيل حضور جماعي')
     try {
       const summary = await runBulkAttendance({
-        codes,
+        entries,
         signal: bulkStop,
         onRow: appendBulkRow,
       })
@@ -779,13 +1016,12 @@ export function mountShell(): void {
       } else {
         toast({
           title: 'لا توجد سجلات جديدة',
-          description: 'جميع الأكواد كانت مسجلة أو تم تخطيها.',
+          description: 'جميع العناصر كانت مسجلة أو تم تخطيها.',
           variant: 'info',
         })
       }
 
-      // Refresh preview so "already present" reflects new state.
-      bulkPreviewData = buildPreview(bulkCodesInput.value, bulkLessonInput.value.trim() || null)
+      renderBulkAnalysisSummary()
     } catch (error) {
       undoRedo.commitBatch({
         title: `تسجيل حضور جماعي (${undoRedo.batchCount})`,
@@ -799,17 +1035,17 @@ export function mountShell(): void {
     } finally {
       bulkRunning = false
       bulkStop.stop = false
-      updateBulkButtons()
+      renderBulkAnalysis()
     }
   }
 
   bulkPreviewBtn.addEventListener('click', () => {
     refreshBulkLesson()
-    showBulkPreview()
+    void analyzeBulkInput()
   })
   bulkArmBtn.addEventListener('click', () => {
-    if (!bulkPreviewData || !bulkPreviewData.parse.codes.length) {
-      showBulkPreview()
+    if (!readyToArm()) {
+      void analyzeBulkInput()
       return
     }
     bulkArmed = true
@@ -817,7 +1053,7 @@ export function mountShell(): void {
     updateBulkButtons()
     toast({
       title: 'التنفيذ مسلّح',
-      description: 'اضغط تنفيذ للبدء. أي تعديل على الأكواد أو الحصة سيلغي التسليح.',
+      description: 'اضغط تنفيذ للبدء. أي تعديل على البيانات سيلغي التسليح.',
       variant: 'warning',
     })
   })
@@ -826,19 +1062,95 @@ export function mountShell(): void {
     if (!bulkRunning) return
     bulkStop.stop = true
     setBulkBadge('جارٍ الإيقاف', 'busy')
-    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف التنفيذ بعد الكود الحالي.', variant: 'warning' })
+    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف التنفيذ بعد الطالب الحالي.', variant: 'warning' })
   })
 
-  bulkCodesInput.addEventListener('input', () => { bulkLessonTouched = bulkLessonTouched; invalidateBulkPreview() })
-  bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkPreview() })
+  bulkCodesInput.addEventListener('input', invalidateBulkAnalysis)
+  bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkAnalysis() })
+
+  bulkResolveBox.addEventListener('click', (event) => {
+    const btn = (event.target as Element).closest<HTMLButtonElement>('[data-resolve-action]')
+    if (!btn) return
+    const key = btn.dataset.key || ''
+    const action = btn.dataset.resolveAction
+    const index = bulkNameRows.findIndex((row) => row.key === key)
+    if (index < 0) return
+
+    if (action === 'choose') {
+      const code = (btn.dataset.code || '').toUpperCase()
+      const name = btn.dataset.name || ''
+      if (!code) {
+        toast({ title: 'لا يوجد كود', description: 'لا يمكن اختيار طالب بدون كود صالح.', variant: 'warning' })
+        return
+      }
+      bulkNameRows[index] = {
+        ...bulkNameRows[index],
+        status: 'resolved',
+        code,
+        studentName: name,
+        message: `تم الاختيار: ${name}${code ? ` (${code})` : ''}`,
+      }
+      bulkArmed = false
+      renderBulkAnalysis()
+      return
+    }
+
+    if (action === 'drop') {
+      bulkNameRows[index] = { ...bulkNameRows[index], status: 'dropped', message: 'تم التجاهل — سيتم إدخاله يدويًا.' }
+      bulkArmed = false
+      renderBulkAnalysis()
+      return
+    }
+
+    if (action === 'undrop' || action === 'change') {
+      const nextStatus = bulkNameRows[index].candidates.length ? 'ambiguous' : 'not-found'
+      bulkNameRows[index] = {
+        ...bulkNameRows[index],
+        status: nextStatus,
+        code: undefined,
+        studentName: undefined,
+      }
+      bulkArmed = false
+      renderBulkAnalysis()
+      return
+    }
+
+    if (action === 'research') {
+      const edit = bulkResolveBox.querySelector<HTMLInputElement>(`[data-resolve-edit="${CSS.escape(key)}"]`)
+      const nextQuery = edit?.value.trim() || bulkNameRows[index].query
+      void reResolveNameRow(key, nextQuery)
+    }
+  })
 
   // Prefill lesson and keep bulk controls in sync with undoRedo state.
   refreshBulkLesson()
-  updateBulkButtons()
+  renderBulkAnalysis()
   undoRedo.subscribe(() => {
     refreshBulkLesson()
     updateBulkButtons()
   })
+
+  const bulkMenu = backdrop.querySelector<HTMLElement>('[data-bulk-view="menu"]')!
+  const bulkDetails = Array.from(backdrop.querySelectorAll<HTMLElement>('.bulk-detail[data-bulk-view]'))
+  function showBulkView(view: 'menu' | 'attendance' | 'evaluation'): void {
+    bulkMenu.hidden = view !== 'menu'
+    for (const detail of bulkDetails) {
+      detail.hidden = detail.dataset.bulkView !== view
+    }
+    if (view === 'attendance') {
+      refreshBulkLesson()
+      updateBulkButtons()
+    }
+  }
+  for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-open]'))) {
+    btn.addEventListener('click', () => {
+      const view = btn.dataset.bulkOpen
+      if (view === 'attendance' || view === 'evaluation') showBulkView(view)
+    })
+  }
+  for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-back]'))) {
+    btn.addEventListener('click', () => showBulkView('menu'))
+  }
 
   GM_registerMenuCommand('Tamperina — معاينة الإشعار', () => {
     toast({

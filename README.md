@@ -8,7 +8,7 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 **M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused.
 
-**M2 — Bulk attendance.** On `/attendance/scan`, the **الجماعي** tab accepts a list of student codes (one per line) and enters them by driving the page's existing scan form in a loop — no native bulk endpoint and no voice widget. The flow is **معاينة** (no writes) → **تسليح التنفيذ** → **تنفيذ**, with a stop button between codes. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. The full plan lives in `dev/PLAN.md` (gitignored).
+**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, evaluation placeholder, and a coming-soon slot). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. The full plan lives in `dev/PLAN.md` (gitignored).
 
 ## Build
 
@@ -60,20 +60,26 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 
 Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History lives only in the current page session and is intentionally cleared on reload.
 
-### Bulk attendance
+### Bulk actions
 
-On `/attendance/scan` (including `?lesson_id=...` links), open **الجماعي**:
+Open **الجماعي** to see available bulk actions. **تقييم جماعي** and additional actions are placeholders for later.
 
-1. Paste **codes only** — one per line. Tamperina normalizes Arabic/Persian digits, uppercases, splits on commas/`و`/newlines, removes duplicates, and ignores invalid tokens.
+#### تسجيل حضور جماعي
+
+On `/attendance/scan` (including `?lesson_id=...` links):
+
+1. Paste one student per line — a **code** or a **name**. Tamperina normalizes Arabic/Persian digits, removes duplicates, and ignores invalid tokens.
 2. Confirm the lesson id (prefilled from the open page). If you change it to a different lesson, open that lesson's scan page first.
-3. Click **معاينة** to see what will happen (no writes), then **تسليح التنفيذ**, then **تنفيذ**.
+3. Click **معاينة وتحليل**. Codes are accepted directly; names are searched in the lesson's students.
+4. Resolve any names that are **not found**, **ambiguous**, or have **too many matches**: choose the correct student, edit the name and re-search, or **تجاهل (يدويًا)** to skip and handle manually.
+5. When everything is resolved or dropped, click **تسليح التنفيذ**, then **تنفيذ**.
 
-Tamperina fills the scan input and submits one code at a time, waits for server confirmation, and logs each result. **إيقاف** stops between codes. Undo/Redo must be enabled so the run is recorded as one reversible batch.
+Tamperina fills the scan input and submits one student at a time, waits for server confirmation, and logs each result. **إيقاف** stops between students. Undo/Redo must be enabled so the run is recorded as one reversible batch.
 
-Suggested prompt for transcribing handwriting:
+Suggested prompt for transcribing handwriting (codes are safest, names are also supported):
 
 ```text
-استخرج أكواد الطلاب فقط من القائمة المكتوبة يدويًا. اكتب كودًا واحدًا في كل سطر، بالأرقام اللاتينية، بدون أسماء أو شرح أو ترقيم.
+استخرج طلاب القائمة المكتوبة يدويًا. اكتب في كل سطر كود الطالب إن كان واضحًا، وإلا اكتب اسم الطالب كما هو. سطر واحد لكل طالب، بدون شرح أو ترقيم.
 ```
 
 When click-through is on, Tamperina stays visible as a faint ghost and a small pin sits on its corner to restore it. Tampermonkey's menu also has restore/open commands, plus **تشخيص التراجع**, which prints the last observed write requests to the browser console and toasts a short summary. If grading undo does not register, that diagnostic shows whether the request was seen and why it was skipped.
