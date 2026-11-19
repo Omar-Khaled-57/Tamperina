@@ -58,7 +58,30 @@ export interface HistoryAction {
   redo: () => Promise<HistoryAction>
 }
 
+export interface UndoRedoDebugObservation {
+  at: number
+  method: string
+  path: string
+  keys: string[]
+  grade: boolean
+  reason?: string
+}
+
+export interface UndoRedoDebug {
+  version: string
+  path: string
+  supported: boolean
+  enabled: boolean
+  canUndo: boolean
+  canRedo: boolean
+  historyCount: number
+  gradeBaselineCount: number
+  hasTouchedGradeRow: boolean
+  observed: UndoRedoDebugObservation[]
+}
+
 export interface UndoRedoController {
+  readonly version: string
   readonly supported: boolean
   readonly enabled: boolean
   readonly busy: boolean
@@ -69,11 +92,15 @@ export interface UndoRedoController {
   undo(): Promise<void>
   redo(): Promise<void>
   subscribe(listener: () => void): () => void
+  debug(): UndoRedoDebug
 }
 
 const SUPPORTED_PATHS = new Set(['/attendance/scan', '/evaluation'])
 const ENABLED_KEY = 'tamperina.feature.undoRedo.enabled.v1'
-const CONTROLLER_KEY = '__tamperinaUndoRedoControllerV1'
+const CONTROLLER_VERSION = 'v2'
+const CONTROLLER_KEY = `__tamperinaUndoRedoController_${CONTROLLER_VERSION}`
+const HOOKS_KEY = `__tamperinaUndoRedoHooks_${CONTROLLER_VERSION}`
+const LEGACY_CONTROLLER_KEYS = ['__tamperinaUndoRedoControllerV1']
 
 const page = (unsafeWindow ?? window) as unknown as Window & Record<string, unknown>
 
@@ -416,6 +443,7 @@ function createController(): UndoRedoController {
   const listeners = new Set<() => void>()
   const records = new Map<string, LiveRecord>()
   const gradeBaselines = new Map<string, GradeSnapshot>()
+  const observed: UndoRedoDebugObservation[] = []
 
   let lastTouchedGradeRow: HTMLElement | null = null
   let enabled = loadEnabled()
@@ -428,6 +456,24 @@ function createController(): UndoRedoController {
 
   const notify = (): void => {
     for (const listener of listeners) listener()
+  }
+
+  const recordObservation = (
+    method: string,
+    url: URL,
+    body: Record<string, unknown>,
+    grade: boolean,
+    reason?: string,
+  ): void => {
+    observed.unshift({
+      at: Date.now(),
+      method,
+      path: `${url.pathname}${url.search}`,
+      keys: Object.keys(body),
+      grade,
+      ...(reason ? { reason } : {}),
+    })
+    if (observed.length > 20) observed.length = 20
   }
 
   let sessionPath = normalisePath(location.pathname)
@@ -577,17 +623,25 @@ function createController(): UndoRedoController {
   }
 
   function findGradeRowFromBody(body: Record<string, unknown>): HTMLElement | null {
-    const candidates = ['student_user_id', 'student_id', 'student', 'user_id', 'code', 'student_code']
+    const candidates = ['student_user_id', 'student_id', 'student', 'user_id', 'code', 'student_code', 'id']
       .map((key) => body[key])
-      .filter((value) => value != null && value !== '')
+      .filter((value) => value != null && value !== '' && typeof value !== 'object')
       .map((value) => String(value))
     if (!candidates.length) return lastTouchedGradeRow
 
-    return Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
-      .find((row) => {
-        const key = gradeRowKey(row) ?? ''
-        return candidates.some((value) => key.endsWith(`|${value}`))
-      }) ?? lastTouchedGradeRow
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
+    const byKey = rows.find((row) => {
+      const key = gradeRowKey(row) ?? ''
+      return candidates.some((value) => key.endsWith(`|${value}`))
+    })
+    if (byKey) return byKey
+
+    // Hidden row inputs often carry the student id even when the visible
+    // code is different, so match those too before falling back to focus.
+    return rows.find((row) => {
+      const snapshot = snapshotGradeRow(row)
+      return !!snapshot?.fields.some((field) => candidates.includes(field.value))
+    }) ?? lastTouchedGradeRow
   }
 
   function applySnapshotToRow(snapshot: GradeSnapshot): void {
@@ -641,16 +695,36 @@ function createController(): UndoRedoController {
     headers: Record<string, string> | undefined,
     json: unknown,
   ): void {
+    const note = (reason: string): void => {
+      if (observed[0]) observed[0].reason = reason
+    }
+
     syncGradeBaseline()
     const bodyObj = asObject(body) ?? {}
     const row = findGradeRowFromBody(bodyObj)
-    if (!row) return
+    if (!row) {
+      note('no-matching-row')
+      return
+    }
 
     const after = snapshotGradeRow(row)
-    if (!after) return
+    if (!after) {
+      note('no-form-snapshot')
+      return
+    }
     const before = gradeBaselines.get(after.key)
-    if (!before || sameGradeSnapshot(before, after)) return
-    if (!isGradeSuccess(json)) return
+    if (!before) {
+      note('no-saved-baseline')
+      return
+    }
+    if (sameGradeSnapshot(before, after)) {
+      note('unchanged-from-saved')
+      return
+    }
+    if (!isGradeSuccess(json)) {
+      note('save-not-confirmed')
+      return
+    }
 
     const command: HttpCommand = {
       method: method as HttpMethod,
@@ -660,19 +734,30 @@ function createController(): UndoRedoController {
     }
     pushAction(makeGradeAction(command, before, after))
     gradeBaselines.set(after.key, after)
+    note('recorded')
   }
 
   function installGradeListeners(): void {
     if (normalisePath(location.pathname) !== '/evaluation') return
-    const remember = (event: Event): void => {
+
+    // Capture the value BEFORE the user edits it. A `change` event already
+    // carries the new value, so it must never overwrite the saved baseline.
+    const rememberBaseline = (event: Event): void => {
       const row = gradeRowFromTarget(event.target)
       if (!row) return
       lastTouchedGradeRow = row
       const snapshot = snapshotGradeRow(row)
       if (snapshot) gradeBaselines.set(snapshot.key, snapshot)
     }
-    document.addEventListener('focusin', remember)
-    document.addEventListener('change', remember)
+    const rememberRowOnly = (event: Event): void => {
+      const row = gradeRowFromTarget(event.target)
+      if (row) lastTouchedGradeRow = row
+    }
+
+    document.addEventListener('focusin', rememberBaseline)
+    document.addEventListener('pointerdown', rememberBaseline)
+    document.addEventListener('change', rememberRowOnly)
+
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', syncGradeBaseline, { once: true })
     } else {
@@ -762,7 +847,9 @@ function createController(): UndoRedoController {
 
     if (normalisePath(location.pathname) === '/evaluation' && method !== 'GET') {
       const gradeBody = asObject(body) ?? {}
-      if (isGradeRequest(url, gradeBody)) {
+      const isGrade = isGradeRequest(url, gradeBody)
+      recordObservation(method, url, gradeBody, isGrade, isGrade ? undefined : 'no-grade-fields')
+      if (isGrade) {
         handleGradeChange(method, url, gradeBody, before.headers, json)
         return
       }
@@ -876,8 +963,8 @@ function createController(): UndoRedoController {
     } as typeof Xhr.prototype.send
   }
 
-  if (!(page as Record<string, unknown>).__tamperinaUndoRedoHooks) {
-    ;(page as Record<string, unknown>).__tamperinaUndoRedoHooks = true
+  if (!(page as Record<string, unknown>)[HOOKS_KEY]) {
+    ;(page as Record<string, unknown>)[HOOKS_KEY] = true
     installFetchHook()
     installXhrHook()
     installGradeListeners()
@@ -952,6 +1039,7 @@ function createController(): UndoRedoController {
   }
 
   return {
+    version: CONTROLLER_VERSION,
     get supported() { return isSupportedPage() },
     get enabled() { return enabled },
     get busy() { return busy },
@@ -975,15 +1063,39 @@ function createController(): UndoRedoController {
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
+    debug(): UndoRedoDebug {
+      return {
+        version: CONTROLLER_VERSION,
+        path: normalisePath(location.pathname),
+        supported: isSupportedPage(),
+        enabled,
+        canUndo: past.length > 0,
+        canRedo: future.length > 0,
+        historyCount: past.length,
+        gradeBaselineCount: gradeBaselines.size,
+        hasTouchedGradeRow: Boolean(lastTouchedGradeRow),
+        observed: observed.map((item) => ({ ...item, keys: [...item.keys] })),
+      }
+    },
   }
 }
 
 /** Installs the network observers once and returns the shared controller. */
 export function initUndoRedo(): UndoRedoController {
   if (!controller) {
+    // An older script version may still be enabled in the same tab. Stop it
+    // from recording before this version installs its own observers.
+    for (const key of LEGACY_CONTROLLER_KEYS) {
+      const legacy = page[key] as UndoRedoController | undefined
+      if (legacy && legacy !== controller) {
+        try { legacy.setEnabled(false) } catch { /* older shape, ignore */ }
+      }
+    }
+
     const existing = page[CONTROLLER_KEY] as UndoRedoController | undefined
-    controller = existing ?? createController()
-    if (!existing) page[CONTROLLER_KEY] = controller
+    controller = existing?.version === CONTROLLER_VERSION ? existing : createController()
+    page[CONTROLLER_KEY] = controller
+    ;(page as Record<string, unknown>).__tamperinaUndoRedoDebug = () => controller!.debug()
   }
   return controller
 }

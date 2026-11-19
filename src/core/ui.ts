@@ -1,4 +1,4 @@
-import { GM_registerMenuCommand } from '$'
+import { GM_registerMenuCommand, unsafeWindow } from '$'
 import rina from 'virtual:tamperina-rina'
 import cairoFontCss from 'virtual:tamperina-fonts'
 import shellStyle from '../ui/styles.css?style'
@@ -497,6 +497,20 @@ export function mountShell(): void {
   GM_registerMenuCommand('Tamperina — تراجع (Ctrl+Z)', () => void undoRedo.undo())
   GM_registerMenuCommand('Tamperina — إعادة (Ctrl+Y)', () => void undoRedo.redo())
   GM_registerMenuCommand('Tamperina — تشغيل/إيقاف التراجع', () => undoRedo.setEnabled(!undoRedo.enabled))
+  GM_registerMenuCommand('Tamperina — تشخيص التراجع', () => {
+    const readDebug = (unsafeWindow as unknown as Record<string, unknown>)
+      .__tamperinaUndoRedoDebug as (() => ReturnType<UndoRedoController['debug']>) | undefined
+    const info = readDebug?.()
+    if (info) console.table(info.observed)
+    toast({
+      title: 'تشخيص تمبرينا',
+      description: info
+        ? `الصفحة ${info.path} · السجل ${info.historyCount} · أساس التقييم ${info.gradeBaselineCount} · طلبات ${info.observed.length}`
+        : 'معلومات التشخيص غير متاحة في هذه النافذة.',
+      variant: 'info',
+      duration: 9000,
+    })
+  })
   GM_registerMenuCommand('Tamperina — فتح الإعدادات', () => openModal())
   GM_registerMenuCommand('Tamperina — إلغاء النقر من خلال', () => {
     state.clickThrough = false

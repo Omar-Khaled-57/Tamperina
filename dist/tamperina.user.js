@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tamperina
 // @namespace    https://github.com/Omar-Khaled-57/Tamperina
-// @version      0.0.5
+// @version      0.0.6
 // @author       Omar Khaled
 // @description  Pixel mascot launcher and growing toolkit for the Ahmed Zakaria platform
 // @supportURL   https://github.com/Omar-Khaled-57/Tamperina/issues
@@ -106,7 +106,10 @@
 	}
 	var SUPPORTED_PATHS = new Set(["/attendance/scan", "/evaluation"]);
 	var ENABLED_KEY = "tamperina.feature.undoRedo.enabled.v1";
-	var CONTROLLER_KEY = "__tamperinaUndoRedoControllerV1";
+	var CONTROLLER_VERSION = "v2";
+	var CONTROLLER_KEY = `__tamperinaUndoRedoController_${CONTROLLER_VERSION}`;
+	var HOOKS_KEY = `__tamperinaUndoRedoHooks_${CONTROLLER_VERSION}`;
+	var LEGACY_CONTROLLER_KEYS = ["__tamperinaUndoRedoControllerV1"];
 	var page = _unsafeWindow ?? window;
 	var controller;
 	function normalisePath(pathname) {
@@ -391,6 +394,7 @@
 		const listeners = new Set();
 		const records = new Map();
 		const gradeBaselines = new Map();
+		const observed = [];
 		let lastTouchedGradeRow = null;
 		let enabled = loadEnabled();
 		let busy = false;
@@ -400,6 +404,17 @@
 		if (page.fetch && !nativeFetch) nativeFetch = page.fetch.bind(page);
 		const notify = () => {
 			for (const listener of listeners) listener();
+		};
+		const recordObservation = (method, url, body, grade, reason) => {
+			observed.unshift({
+				at: Date.now(),
+				method,
+				path: `${url.pathname}${url.search}`,
+				keys: Object.keys(body),
+				grade,
+				...reason ? { reason } : {}
+			});
+			if (observed.length > 20) observed.length = 20;
 		};
 		let sessionPath = normalisePath(location.pathname);
 		function resetForNavigation() {
@@ -531,12 +546,18 @@
 				"student",
 				"user_id",
 				"code",
-				"student_code"
-			].map((key) => body[key]).filter((value) => value != null && value !== "").map((value) => String(value));
+				"student_code",
+				"id"
+			].map((key) => body[key]).filter((value) => value != null && value !== "" && typeof value !== "object").map((value) => String(value));
 			if (!candidates.length) return lastTouchedGradeRow;
-			return Array.from(document.querySelectorAll(".evaluation-table tbody tr")).find((row) => {
+			const rows = Array.from(document.querySelectorAll(".evaluation-table tbody tr"));
+			const byKey = rows.find((row) => {
 				const key = gradeRowKey(row) ?? "";
 				return candidates.some((value) => key.endsWith(`|${value}`));
+			});
+			if (byKey) return byKey;
+			return rows.find((row) => {
+				return !!snapshotGradeRow(row)?.fields.some((field) => candidates.includes(field.value));
 			}) ?? lastTouchedGradeRow;
 		}
 		function applySnapshotToRow(snapshot) {
@@ -577,15 +598,34 @@
 			};
 		}
 		function handleGradeChange(method, url, body, headers, json) {
+			const note = (reason) => {
+				if (observed[0]) observed[0].reason = reason;
+			};
 			syncGradeBaseline();
 			const bodyObj = asObject(body) ?? {};
 			const row = findGradeRowFromBody(bodyObj);
-			if (!row) return;
+			if (!row) {
+				note("no-matching-row");
+				return;
+			}
 			const after = snapshotGradeRow(row);
-			if (!after) return;
+			if (!after) {
+				note("no-form-snapshot");
+				return;
+			}
 			const before = gradeBaselines.get(after.key);
-			if (!before || sameGradeSnapshot(before, after)) return;
-			if (!isGradeSuccess(json)) return;
+			if (!before) {
+				note("no-saved-baseline");
+				return;
+			}
+			if (sameGradeSnapshot(before, after)) {
+				note("unchanged-from-saved");
+				return;
+			}
+			if (!isGradeSuccess(json)) {
+				note("save-not-confirmed");
+				return;
+			}
 			pushAction(makeGradeAction({
 				method,
 				url: url.href,
@@ -593,18 +633,24 @@
 				headers
 			}, before, after));
 			gradeBaselines.set(after.key, after);
+			note("recorded");
 		}
 		function installGradeListeners() {
 			if (normalisePath(location.pathname) !== "/evaluation") return;
-			const remember = (event) => {
+			const rememberBaseline = (event) => {
 				const row = gradeRowFromTarget(event.target);
 				if (!row) return;
 				lastTouchedGradeRow = row;
 				const snapshot = snapshotGradeRow(row);
 				if (snapshot) gradeBaselines.set(snapshot.key, snapshot);
 			};
-			document.addEventListener("focusin", remember);
-			document.addEventListener("change", remember);
+			const rememberRowOnly = (event) => {
+				const row = gradeRowFromTarget(event.target);
+				if (row) lastTouchedGradeRow = row;
+			};
+			document.addEventListener("focusin", rememberBaseline);
+			document.addEventListener("pointerdown", rememberBaseline);
+			document.addEventListener("change", rememberRowOnly);
 			if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", syncGradeBaseline, { once: true });
 			else syncGradeBaseline();
 		}
@@ -670,7 +716,9 @@
 			if (!enabled) return;
 			if (normalisePath(location.pathname) === "/evaluation" && method !== "GET") {
 				const gradeBody = asObject(body) ?? {};
-				if (isGradeRequest(url, gradeBody)) {
+				const isGrade = isGradeRequest(url, gradeBody);
+				recordObservation(method, url, gradeBody, isGrade, isGrade ? void 0 : "no-grade-fields");
+				if (isGrade) {
 					handleGradeChange(method, url, gradeBody, before.headers, json);
 					return;
 				}
@@ -750,8 +798,8 @@
 				return originalSend.apply(this, [body]);
 			};
 		}
-		if (!page.__tamperinaUndoRedoHooks) {
-			page.__tamperinaUndoRedoHooks = true;
+		if (!page[HOOKS_KEY]) {
+			page[HOOKS_KEY] = true;
 			installFetchHook();
 			installXhrHook();
 			installGradeListeners();
@@ -826,6 +874,7 @@
 			}
 		}
 		return {
+			version: CONTROLLER_VERSION,
 			get supported() {
 				return isSupportedPage();
 			},
@@ -860,14 +909,38 @@
 			subscribe(listener) {
 				listeners.add(listener);
 				return () => listeners.delete(listener);
+			},
+			debug() {
+				return {
+					version: CONTROLLER_VERSION,
+					path: normalisePath(location.pathname),
+					supported: isSupportedPage(),
+					enabled,
+					canUndo: past.length > 0,
+					canRedo: future.length > 0,
+					historyCount: past.length,
+					gradeBaselineCount: gradeBaselines.size,
+					hasTouchedGradeRow: Boolean(lastTouchedGradeRow),
+					observed: observed.map((item) => ({
+						...item,
+						keys: [...item.keys]
+					}))
+				};
 			}
 		};
 	}
 	function initUndoRedo() {
 		if (!controller) {
+			for (const key of LEGACY_CONTROLLER_KEYS) {
+				const legacy = page[key];
+				if (legacy && legacy !== controller) try {
+					legacy.setEnabled(false);
+				} catch {}
+			}
 			const existing = page[CONTROLLER_KEY];
-			controller = existing ?? createController();
-			if (!existing) page[CONTROLLER_KEY] = controller;
+			controller = existing?.version === CONTROLLER_VERSION ? existing : createController();
+			page[CONTROLLER_KEY] = controller;
+			page.__tamperinaUndoRedoDebug = () => controller.debug();
 		}
 		return controller;
 	}
@@ -1333,6 +1406,17 @@
 		_GM_registerMenuCommand("Tamperina — تراجع (Ctrl+Z)", () => void undoRedo.undo());
 		_GM_registerMenuCommand("Tamperina — إعادة (Ctrl+Y)", () => void undoRedo.redo());
 		_GM_registerMenuCommand("Tamperina — تشغيل/إيقاف التراجع", () => undoRedo.setEnabled(!undoRedo.enabled));
+		_GM_registerMenuCommand("Tamperina — تشخيص التراجع", () => {
+			const readDebug = _unsafeWindow.__tamperinaUndoRedoDebug;
+			const info = readDebug?.();
+			if (info) console.table(info.observed);
+			toast({
+				title: "تشخيص تمبرينا",
+				description: info ? `الصفحة ${info.path} · السجل ${info.historyCount} · أساس التقييم ${info.gradeBaselineCount} · طلبات ${info.observed.length}` : "معلومات التشخيص غير متاحة في هذه النافذة.",
+				variant: "info",
+				duration: 9e3
+			});
+		});
 		_GM_registerMenuCommand("Tamperina — فتح الإعدادات", () => openModal());
 		_GM_registerMenuCommand("Tamperina — إلغاء النقر من خلال", () => {
 			state.clickThrough = false;

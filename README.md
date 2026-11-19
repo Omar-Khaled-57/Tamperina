@@ -58,7 +58,7 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 
 Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History lives only in the current page session and is intentionally cleared on reload.
 
-When click-through is on, Tamperina stays visible as a faint ghost and a small pin sits on its corner to restore it. Tampermonkey's menu also has restore/open commands.
+When click-through is on, Tamperina stays visible as a faint ghost and a small pin sits on its corner to restore it. Tampermonkey's menu also has restore/open commands, plus **تشخيص التراجع**, which prints the last observed write requests to the browser console and toasts a short summary. If grading undo does not register, that diagnostic shows whether the request was seen and why it was skipped.
 
 ## Notes
 
