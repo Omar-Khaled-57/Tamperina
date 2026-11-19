@@ -55,7 +55,7 @@ export interface ParseEntriesResult {
   totalTokens: number
 }
 
-export type ResolveStatus = 'ready' | 'resolved' | 'ambiguous' | 'not-found' | 'too-many' | 'dropped' | 'loading' | 'error'
+export type ResolveStatus = 'ready' | 'resolved' | 'ambiguous' | 'not-found' | 'too-many' | 'dropped' | 'walk-in' | 'loading' | 'error'
 
 export interface NameRow {
   kind: 'name'
@@ -674,6 +674,7 @@ export async function runBulkAttendance(options: {
           options.signal.stop = true
           stopped = true
         } else if (event.type === 'add') {
+          undoRedo.ensureAttendanceRecorded(event.record)
           const payLabel = override ? {
             paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي/مؤجل',
           }[override.status] : 'افتراضي الحصة'
@@ -727,6 +728,7 @@ export async function runBulkAttendance(options: {
     }
 
     if (result.type === 'add') {
+      undoRedo.ensureAttendanceRecorded(result.record)
       recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', recordId: result.record.id, at: Date.now() })
     } else if (result.type === 'duplicate') {
       recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: result.record.id, at: Date.now() })

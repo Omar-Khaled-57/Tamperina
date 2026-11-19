@@ -1,4 +1,5 @@
 import { toast } from './toast'
+import { getUndoRedoController } from './undoRedo'
 
 /**
  * /evaluation helpers shared by the three new toggles:
@@ -281,6 +282,9 @@ export function findOptionByLabel(select: HTMLSelectElement, label: string): HTM
 
 function setSelectValue(select: HTMLSelectElement, value: string): void {
   if (select.value === value) return
+  // Remember the saved value before our write so Ctrl+Z can restore it.
+  const row = select.closest<HTMLElement>(ROW_SELECTOR)
+  if (row) getUndoRedoController().captureGradeBaseline(row)
   select.value = value
   select.dispatchEvent(new Event('input', { bubbles: true }))
   select.dispatchEvent(new Event('change', { bubbles: true }))
@@ -320,7 +324,11 @@ export function examScoreInput(row: HTMLElement): HTMLInputElement | null {
 export function typeExamKey(row: HTMLElement, char: string): void {
   const input = examScoreInput(row)
   if (!input) return
-  if (!typing || typing.row !== row) typing = { row, text: '' }
+  if (!typing || typing.row !== row) {
+    typing = { row, text: '' }
+    // Baseline the score before the first keystroke changes the input.
+    getUndoRedoController().captureGradeBaseline(row)
+  }
   if (char === 'backspace') typing.text = typing.text.slice(0, -1)
   else if (char === '.') {
     if (!typing.text.includes('.')) typing.text += '.'

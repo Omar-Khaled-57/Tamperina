@@ -49,6 +49,21 @@ interface GradeSnapshot {
   grade?: string
 }
 
+export interface SerializedActionBase {
+  id: string
+  title: string
+  detail: string
+  at: number
+  warning?: string
+}
+
+export type SerializedAction = SerializedActionBase & (
+  | { kind: 'attendance-add', record: LiveRecord, headers?: Record<string, string> }
+  | { kind: 'attendance-remove', record: LiveRecord, headers?: Record<string, string> }
+  | { kind: 'grade', command: HttpCommand, before: GradeSnapshot, after: GradeSnapshot }
+  | { kind: 'batch', title: string, detail: string, actions: SerializedAction[] }
+)
+
 export interface HistoryAction {
   id: string
   title: string
@@ -58,6 +73,8 @@ export interface HistoryAction {
   redo: () => Promise<HistoryAction>
   /** Set when a batch finished but some of its items could not be reversed. */
   warning?: string
+  /** Serializable form used to restore history after a reload or navigation. */
+  readonly serialized: SerializedAction
 }
 
 export interface UndoRedoDebugObservation {
@@ -106,6 +123,10 @@ export interface UndoRedoController {
   redo(): Promise<void>
   beginBatch(title: string): void
   commitBatch(options?: { title?: string, detail?: string }): HistoryAction | null
+  /** Record an attendance add explicitly; deduplicated against the network observer. */
+  ensureAttendanceRecorded(record: LiveRecord, headers?: Record<string, string>): void
+  /** Capture the saved grade values before Tamperina changes a row's grade. */
+  captureGradeBaseline(row: HTMLElement): void
   subscribe(listener: () => void): () => void
   onAttendance(listener: (event: AttendanceEvent) => void): () => void
   debug(): UndoRedoDebug
@@ -116,6 +137,44 @@ const ENABLED_KEY = 'tamperina.feature.undoRedo.enabled.v1'
 const CONTROLLER_VERSION = 'v3'
 const CONTROLLER_KEY = `__tamperinaUndoRedoController_${CONTROLLER_VERSION}`
 const HOOKS_KEY = `__tamperinaUndoRedoHooks_${CONTROLLER_VERSION}`
+const SESSION_KEY = 'tamperina.undoRedo.session.v1'
+
+interface PersistedState {
+  past: SerializedAction[]
+  future: SerializedAction[]
+  records: LiveRecord[]
+  gradeBaselines: GradeSnapshot[]
+  recordedAttendanceIds: string[]
+  currentLessonId: string | null
+}
+
+function sessionStore(): Storage | null {
+  try {
+    return (unsafeWindow ?? window).sessionStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+function loadPersistedState(): PersistedState | null {
+  try {
+    const raw = sessionStore()?.getItem(SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<PersistedState>
+    if (!Array.isArray(parsed.past) || !Array.isArray(parsed.future)) return null
+    return {
+      past: parsed.past,
+      future: parsed.future,
+      records: Array.isArray(parsed.records) ? parsed.records : [],
+      gradeBaselines: Array.isArray(parsed.gradeBaselines) ? parsed.gradeBaselines : [],
+      recordedAttendanceIds: Array.isArray(parsed.recordedAttendanceIds) ? parsed.recordedAttendanceIds : [],
+      currentLessonId: parsed.currentLessonId ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
 const LEGACY_CONTROLLER_KEYS = [
   '__tamperinaUndoRedoControllerV1',
   '__tamperinaUndoRedoController_v2',
@@ -350,9 +409,11 @@ function snapshotGradeRow(row: HTMLElement): GradeSnapshot | null {
   const key = gradeRowKey(row)
   if (!key) return null
 
-  const form = row.querySelector<HTMLFormElement>('form')
+  // Some evaluation tables put the score/grade controls straight in the row
+  // instead of wrapping them in a <form>. Snapshot the row itself then.
+  const scope: ParentNode = row.querySelector<HTMLFormElement>('form') ?? row
   const fields: GradeField[] = []
-  for (const element of Array.from(form?.elements ?? [])) {
+  for (const element of Array.from(scope.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input, select, textarea'))) {
     const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
     const name = control.name
     if (!name || /(?:^|_)(?:token|csrf|_token)|csrf/i.test(name)) continue
@@ -369,8 +430,8 @@ function snapshotGradeRow(row: HTMLElement): GradeSnapshot | null {
     })
   }
 
-  const score = form?.querySelector<HTMLInputElement>('[name="exam_score"], [name="score"]')?.value
-  const grade = form?.querySelector<HTMLSelectElement>('[name="grade"], [name="evaluation"], [name="estimation"]')?.value
+  const score = scope.querySelector<HTMLInputElement>('[name="exam_score"], [name="score"]')?.value
+  const grade = scope.querySelector<HTMLSelectElement>('[name="grade"], [name="evaluation"], [name="estimation"]')?.value
 
   return {
     key,
@@ -457,25 +518,32 @@ async function readRequestBody(input: Parameters<typeof fetch>[0], init?: Reques
 }
 
 function createController(): UndoRedoController {
-  const past: HistoryAction[] = []
-  const future: HistoryAction[] = []
+  const persisted = loadPersistedState()
   const listeners = new Set<() => void>()
   const attendanceListeners = new Set<(event: AttendanceEvent) => void>()
-  const records = new Map<string, LiveRecord>()
-  const gradeBaselines = new Map<string, GradeSnapshot>()
+  const records = new Map<string, LiveRecord>(
+    (persisted?.records ?? []).filter((record) => !!record?.id).map((record) => [record.id, record]),
+  )
+  const recordedAttendanceIds = new Set<string>(persisted?.recordedAttendanceIds ?? [])
+  const gradeBaselines = new Map<string, GradeSnapshot>(
+    (persisted?.gradeBaselines ?? []).filter((snapshot) => !!snapshot?.key).map((snapshot) => [snapshot.key, snapshot]),
+  )
+  const past: HistoryAction[] = (persisted?.past ?? []).map(reviveAction).filter(Boolean)
+  const future: HistoryAction[] = (persisted?.future ?? []).map(reviveAction).filter(Boolean)
   const observed: UndoRedoDebugObservation[] = []
 
   let lastTouchedGradeRow: HTMLElement | null = null
   let enabled = loadEnabled()
   let busy = false
   let sequence = 0
-  let currentLessonId: string | null = null
+  let currentLessonId: string | null = persisted?.currentLessonId ?? null
   let nativeFetch: typeof fetch | null = null
   let batch: { title: string, actions: HistoryAction[] } | null = null
 
   if (page.fetch && !nativeFetch) nativeFetch = page.fetch.bind(page)
 
   const notify = (): void => {
+    persist()
     for (const listener of listeners) listener()
   }
 
@@ -507,16 +575,47 @@ function createController(): UndoRedoController {
     const path = normalisePath(location.pathname)
     if (path === sessionPath) return
     sessionPath = path
-    past.length = 0
-    future.length = 0
-    batch = null
-    records.clear()
-    gradeBaselines.clear()
-    lastTouchedGradeRow = null
+
+    // History now lives for the whole browser session, not just the current
+    // page. Only page-scoped grade state is reset on navigation.
+    if (path !== '/evaluation') {
+      gradeBaselines.clear()
+      lastTouchedGradeRow = null
+    }
     notify()
   }
 
   const nextId = (): string => `undo-${Date.now()}-${++sequence}`
+
+  function persist(): void {
+    try {
+      const state: PersistedState = {
+        past: past.map((action) => action.serialized),
+        future: future.map((action) => action.serialized),
+        records: Array.from(records.values()),
+        gradeBaselines: Array.from(gradeBaselines.values()),
+        recordedAttendanceIds: Array.from(recordedAttendanceIds),
+        currentLessonId,
+      }
+      sessionStore()?.setItem(SESSION_KEY, JSON.stringify(state))
+    } catch {
+      // Session storage can be unavailable or full; history still lives in memory.
+    }
+  }
+
+  function reviveAction(serialized: SerializedAction): HistoryAction {
+    switch (serialized.kind) {
+      case 'attendance-add':
+        return makeAddedAction(serialized.record, serialized.headers, serialized)
+      case 'attendance-remove':
+        return makeRemovedAction(serialized.record, serialized.headers, serialized)
+      case 'grade':
+        return makeGradeAction(serialized.command, serialized.before, serialized.after, serialized)
+      case 'batch':
+        return makeBatchAction(serialized.title, serialized.detail,
+          serialized.actions.map(reviveAction), serialized.warning, serialized)
+    }
+  }
 
   function buildPostBody(record: LiveRecord): Record<string, unknown> {
     const student = studentCode(record)
@@ -577,21 +676,39 @@ function createController(): UndoRedoController {
   function cacheRecord(record: LiveRecord | null): void {
     if (!record) return
     records.set(record.id, record)
+    persist()
   }
 
   function forgetRecord(id: string): void {
     records.delete(id)
+    persist()
   }
 
-  function makeAddedAction(record: LiveRecord, headers?: Record<string, string>): HistoryAction {
+  function makeAddedAction(
+    record: LiveRecord,
+    headers?: Record<string, string>,
+    restored?: SerializedAction,
+  ): HistoryAction {
     const label = labelFor(record)
     const code = studentCode(record)
+    const data: SerializedAction = {
+      id: restored?.id ?? nextId(),
+      title: restored?.title ?? `تسجيل حضور ${label}`,
+      detail: restored?.detail ?? (code ? `كود الطالب ${code}` : 'عملية حضور'),
+      at: restored?.at ?? Date.now(),
+      ...(restored?.warning ? { warning: restored.warning } : {}),
+      kind: 'attendance-add',
+      record,
+      headers,
+    }
 
     return {
-      id: nextId(),
-      title: `تسجيل حضور ${label}`,
-      detail: code ? `كود الطالب ${code}` : 'عملية حضور',
-      at: Date.now(),
+      id: data.id,
+      title: data.title,
+      detail: data.detail,
+      at: data.at,
+      ...(data.warning ? { warning: data.warning } : {}),
+      serialized: data,
       undo: async () => {
         const response = await send(deleteCommand(record.id, headers))
         if (!isDeleteSuccess(response)) throw new Error('لم يؤكد الخادم حذف سجل الحضور')
@@ -609,15 +726,31 @@ function createController(): UndoRedoController {
     }
   }
 
-  function makeRemovedAction(record: LiveRecord, headers?: Record<string, string>): HistoryAction {
+  function makeRemovedAction(
+    record: LiveRecord,
+    headers?: Record<string, string>,
+    restored?: SerializedAction,
+  ): HistoryAction {
     const label = labelFor(record)
     const code = studentCode(record)
+    const data: SerializedAction = {
+      id: restored?.id ?? nextId(),
+      title: restored?.title ?? `حذف حضور ${label}`,
+      detail: restored?.detail ?? (code ? `كود الطالب ${code}` : 'عملية حضور'),
+      at: restored?.at ?? Date.now(),
+      ...(restored?.warning ? { warning: restored.warning } : {}),
+      kind: 'attendance-remove',
+      record,
+      headers,
+    }
 
     return {
-      id: nextId(),
-      title: `حذف حضور ${label}`,
-      detail: code ? `كود الطالب ${code}` : 'عملية حضور',
-      at: Date.now(),
+      id: data.id,
+      title: data.title,
+      detail: data.detail,
+      at: data.at,
+      ...(data.warning ? { warning: data.warning } : {}),
+      serialized: data,
       undo: async () => {
         const response = await send(addCommand(record, headers))
         const restored = restoredRecordFrom(response, record)
@@ -635,11 +768,24 @@ function createController(): UndoRedoController {
     }
   }
 
+  /** Called by our grading tools before they write, so "before" is the saved value. */
+  function captureGradeBaseline(row: HTMLElement): void {
+    if (normalisePath(location.pathname) !== '/evaluation') return
+    const snapshot = snapshotGradeRow(row)
+    if (!snapshot) return
+    lastTouchedGradeRow = row
+    gradeBaselines.set(snapshot.key, snapshot)
+    persist()
+  }
+
   function syncGradeBaseline(): void {
     if (normalisePath(location.pathname) !== '/evaluation') return
     for (const row of Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))) {
       const snapshot = snapshotGradeRow(row)
-      if (snapshot && !gradeBaselines.has(snapshot.key)) gradeBaselines.set(snapshot.key, snapshot)
+      if (snapshot && !gradeBaselines.has(snapshot.key)) {
+        gradeBaselines.set(snapshot.key, snapshot)
+        persist()
+      }
     }
   }
 
@@ -648,12 +794,25 @@ function createController(): UndoRedoController {
       .find((row) => gradeRowKey(row) === key) ?? null
   }
 
+  function collectGradeIds(value: unknown, out: string[], depth = 0): void {
+    if (depth > 3 || !value || typeof value !== 'object' || out.length > 40) return
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (/^(student|user|code|id)/i.test(key)
+        && (typeof item === 'string' || typeof item === 'number')
+        && String(item).trim()) {
+        out.push(String(item).trim())
+      } else if (item && typeof item === 'object') {
+        collectGradeIds(item, out, depth + 1)
+      }
+    }
+  }
+
   function findGradeRowFromBody(body: Record<string, unknown>): HTMLElement | null {
-    const candidates = ['student_user_id', 'student_id', 'student', 'user_id', 'code', 'student_code', 'id']
-      .map((key) => body[key])
-      .filter((value) => value != null && value !== '' && typeof value !== 'object')
-      .map((value) => String(value))
-    if (!candidates.length) return lastTouchedGradeRow
+    const candidates: string[] = []
+    collectGradeIds(body, candidates)
+    const fallback = lastTouchedGradeRow
+      ?? document.querySelector<HTMLElement>('.evaluation-table tbody tr.tamperina-selected')
+    if (!candidates.length) return fallback
 
     const rows = Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
     const byKey = rows.find((row) => {
@@ -667,13 +826,14 @@ function createController(): UndoRedoController {
     return rows.find((row) => {
       const snapshot = snapshotGradeRow(row)
       return !!snapshot?.fields.some((field) => candidates.includes(field.value))
-    }) ?? lastTouchedGradeRow
+    }) ?? fallback
   }
 
   function applySnapshotToRow(snapshot: GradeSnapshot): void {
     const row = findGradeRowByKey(snapshot.key)
     if (!row) return
-    const controls = Array.from(row.querySelector('form')?.elements ?? []) as Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
+    const scope: ParentNode = row.querySelector<HTMLFormElement>('form') ?? row
+    const controls = Array.from(scope.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input, select, textarea'))
     for (const field of snapshot.fields) {
       const control = controls.find((item) => item.name === field.name)
       if (!control) continue
@@ -685,24 +845,43 @@ function createController(): UndoRedoController {
     }
   }
 
-  function makeGradeAction(command: HttpCommand, before: GradeSnapshot, after: GradeSnapshot): HistoryAction {
+  function makeGradeAction(
+    command: HttpCommand,
+    before: GradeSnapshot,
+    after: GradeSnapshot,
+    restored?: SerializedAction,
+  ): HistoryAction {
     const gradePart = before.grade && after.grade && before.grade !== after.grade
       ? ` · ${before.grade} ← ${after.grade}`
       : ''
+    const data: SerializedAction = {
+      id: restored?.id ?? nextId(),
+      title: restored?.title ?? `تعديل تقييم ${after.label}`,
+      detail: restored?.detail ?? `من ${before.score ?? '—'} إلى ${after.score ?? '—'}${gradePart}`,
+      at: restored?.at ?? Date.now(),
+      ...(restored?.warning ? { warning: restored.warning } : {}),
+      kind: 'grade',
+      command,
+      before,
+      after,
+    }
 
     const replay = async (target: GradeSnapshot): Promise<void> => {
       const body = command.body ? patchGradeBody(command.body, target) : undefined
       const response = await send({ ...command, body })
       if (!isGradeSuccess(response)) throw new Error('لم يؤكد الخادم حفظ التقييم')
       gradeBaselines.set(target.key, target)
+      persist()
       applySnapshotToRow(target)
     }
 
     return {
-      id: nextId(),
-      title: `تعديل تقييم ${after.label}`,
-      detail: `من ${before.score ?? '—'} إلى ${after.score ?? '—'}${gradePart}`,
-      at: Date.now(),
+      id: data.id,
+      title: data.title,
+      detail: data.detail,
+      at: data.at,
+      ...(data.warning ? { warning: data.warning } : {}),
+      serialized: data,
       undo: async () => {
         await replay(before)
         return makeGradeAction(command, before, after)
@@ -760,6 +939,7 @@ function createController(): UndoRedoController {
     }
     pushAction(makeGradeAction(command, before, after))
     gradeBaselines.set(after.key, after)
+    persist()
     note('recorded')
   }
 
@@ -773,7 +953,10 @@ function createController(): UndoRedoController {
       if (!row) return
       lastTouchedGradeRow = row
       const snapshot = snapshotGradeRow(row)
-      if (snapshot) gradeBaselines.set(snapshot.key, snapshot)
+      if (snapshot) {
+        gradeBaselines.set(snapshot.key, snapshot)
+        persist()
+      }
     }
     const rememberRowOnly = (event: Event): void => {
       const row = gradeRowFromTarget(event.target)
@@ -795,7 +978,21 @@ function createController(): UndoRedoController {
     title: string,
     detail: string,
     actions: HistoryAction[],
+    warning?: string,
+    restored?: SerializedAction,
   ): HistoryAction {
+    const resolvedTitle = restored?.title ?? title
+    const resolvedDetail = restored?.detail ?? detail
+    const data: SerializedAction = {
+      id: restored?.id ?? nextId(),
+      title: resolvedTitle,
+      detail: resolvedDetail,
+      at: restored?.at ?? Date.now(),
+      ...(warning ? { warning } : {}),
+      kind: 'batch',
+      actions: actions.map((action) => action.serialized),
+    }
+
     const run = async (direction: 'undo' | 'redo'): Promise<HistoryAction> => {
       const next: HistoryAction[] = new Array(actions.length)
       const failures: string[] = []
@@ -813,18 +1010,19 @@ function createController(): UndoRedoController {
         }
       }
 
-      const grouped = makeBatchAction(title, detail, next)
-      if (failures.length) {
-        grouped.warning = `اكتمل ${actions.length - failures.length} من ${actions.length} — تعذّر: ${failures.slice(0, 3).join('، ')}`
-      }
-      return grouped
+      const nextWarning = failures.length
+        ? `اكتمل ${actions.length - failures.length} من ${actions.length} — تعذّر: ${failures.slice(0, 3).join('، ')}`
+        : undefined
+      return makeBatchAction(resolvedTitle, resolvedDetail, next, nextWarning)
     }
 
     return {
-      id: nextId(),
-      title,
-      detail,
-      at: Date.now(),
+      id: data.id,
+      title: data.title,
+      detail: data.detail,
+      at: data.at,
+      ...(data.warning ? { warning: data.warning } : {}),
+      serialized: data,
       undo: () => run('undo'),
       redo: () => run('redo'),
     }
@@ -886,6 +1084,7 @@ function createController(): UndoRedoController {
     }
 
     cacheRecord(record)
+    recordedAttendanceIds.add(record.id)
     pushAction(makeAddedAction(record, before.headers))
     emitAttendance({ type: 'add', record })
   }
@@ -912,7 +1111,10 @@ function createController(): UndoRedoController {
     if (method === 'GET') {
       if (url.pathname === '/attendance/live') {
         const lessonId = url.searchParams.get('lesson_id')
-        if (lessonId) currentLessonId = lessonId
+        if (lessonId) {
+          currentLessonId = lessonId
+          persist()
+        }
         cacheLiveResponse(json)
       }
       return
@@ -922,7 +1124,10 @@ function createController(): UndoRedoController {
 
     if (normalisePath(location.pathname) === '/evaluation' && method !== 'GET') {
       const gradeBody = asObject(body) ?? {}
+      const touchedRow = lastTouchedGradeRow != null
+        || !!document.querySelector('.evaluation-table tbody tr.tamperina-selected')
       const isGrade = isGradeRequest(url, gradeBody)
+        || (touchedRow && Object.keys(gradeBody).length > 0)
       recordObservation(method, url, gradeBody, isGrade, isGrade ? undefined : 'no-grade-fields')
       if (isGrade) {
         handleGradeChange(method, url, gradeBody, before.headers, json)
@@ -1051,7 +1256,7 @@ function createController(): UndoRedoController {
 
   async function undo(): Promise<void> {
     resetForNavigation()
-    if (!isSupportedPage() || !enabled || busy) return
+    if (!enabled || busy) return
     const action = past[past.length - 1]
     if (!action) {
       toast({ title: 'لا يوجد ما يمكن التراجع عنه', variant: 'warning' })
@@ -1086,7 +1291,7 @@ function createController(): UndoRedoController {
 
   async function redo(): Promise<void> {
     resetForNavigation()
-    if (!isSupportedPage() || !enabled || busy) return
+    if (!enabled || busy) return
     const action = future[future.length - 1]
     if (!action) {
       toast({ title: 'لا يوجد ما يمكن إعادته', variant: 'warning' })
@@ -1117,6 +1322,19 @@ function createController(): UndoRedoController {
       busy = false
       notify()
     }
+  }
+
+  /**
+   * Bulk flows already wait for the observer's add event, but recording must not
+   * depend on that event also reaching history. Deduplicate by record id so an
+   * observed add is never pushed twice.
+   */
+  function ensureAttendanceRecorded(record: LiveRecord, headers?: Record<string, string>): void {
+    if (!enabled || !isSupportedPage() || !record?.id) return
+    if (recordedAttendanceIds.has(record.id)) return
+    recordedAttendanceIds.add(record.id)
+    cacheRecord(record)
+    pushAction(makeAddedAction(record, headers))
   }
 
   return {
@@ -1151,6 +1369,7 @@ function createController(): UndoRedoController {
     },
     undo,
     redo,
+    captureGradeBaseline,
     beginBatch(title: string) {
       if (batch) return
       batch = { title, actions: [] }
@@ -1172,6 +1391,7 @@ function createController(): UndoRedoController {
       notify()
       return grouped
     },
+    ensureAttendanceRecorded,
     subscribe(listener: () => void) {
       listeners.add(listener)
       return () => listeners.delete(listener)

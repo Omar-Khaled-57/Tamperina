@@ -530,7 +530,7 @@ export function mountShell(): void {
         ${historyHtml}
 
         <p class="feature-note">${icons.shieldAlert}
-          السجل مؤقت لهذه الصفحة فقط، ولا يُحفظ بعد تحديثها. مفتاح التشغيل هو السماح بتنفيذ التراجع. في صفحة الحضور تعمل الاختصارات حتى أثناء كتابة حقل البحث.
+          يُحفظ السجل في جلسة المتصفح (sessionStorage): يبقى بعد تحديث الصفحة أو الانتقال بين صفحات المنصة، ويُمسح عند إغلاق التبويب أو المتصفح. مفتاح التشغيل هو السماح بتنفيذ التراجع. في صفحة الحضور تعمل الاختصارات حتى أثناء كتابة حقل البحث.
         </p>
       </section>
     `
@@ -803,7 +803,7 @@ export function mountShell(): void {
       const redoShortcut = event.code === 'KeyY' || (event.code === 'KeyZ' && event.shiftKey)
       const undoShortcut = event.code === 'KeyZ' && !event.shiftKey
       if ((undoShortcut || redoShortcut)
-        && undoRedo.supported
+        && (undoRedo.supported || undoRedo.canUndo || undoRedo.canRedo)
         && undoRedo.enabled
         && (isAttendancePage() || !isEditableTarget(event.target))) {
         event.preventDefault()
@@ -1061,7 +1061,7 @@ export function mountShell(): void {
 
   function walkInPageHidden(el: HTMLElement): boolean {
     const style = getComputedStyle(el)
-    return el.hidden || el.offsetParent === null
+    return Boolean(el.hidden) || el.offsetParent === null
       || style.display === 'none' || style.visibility === 'hidden'
   }
 
@@ -1115,7 +1115,7 @@ export function mountShell(): void {
       return
     }
     if (!ensureWalkInFormVisible(form)) {
-      toast({ title: 'اللوحة مخفية', description: 'افتح لوحة «طلاب جدد بدون كارت» يدويًا ثم حاول again.', variant: 'warning' })
+      toast({ title: 'اللوحة مخفية', description: 'افتح لوحة «طلاب جدد بدون كارت» يدويًا ثم حاول مجددًا.', variant: 'warning' })
       return
     }
 
@@ -1620,6 +1620,7 @@ export function mountShell(): void {
         lessonId,
       })
 
+      const recordedBeforeCommit = undoRedo.batchCount
       const committed = undoRedo.commitBatch({
         title: `تسجيل حضور جماعي (${summary.created})`,
         detail: `تم ${summary.created} · موجود ${summary.duplicates} · متخطى ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}`,
@@ -1628,9 +1629,14 @@ export function mountShell(): void {
       if (!committed && summary.created > 0) {
         toast({
           title: 'اكتمل التنفيذ بدون سجل تراجع',
-          description: 'لم يتم تسجيل الدفعة في سجل التراجع.',
+          description: `لم يُسجَّل أي إجراء قابل للإلغاء (أُكّد ${summary.created} تسجيل، لكن السجل لم يحتوِ على إجراءات). استخدم تشخيص التراجع لعرض الطلبات المرصودة.`,
           variant: 'warning',
-          duration: 7000,
+          duration: 9000,
+        })
+        console.warn('[Tamperina] bulk batch had no recorded actions', {
+          created: summary.created,
+          recordedBeforeCommit,
+          debug: undoRedo.debug(),
         })
       } else if (summary.created > 0) {
         toast({
@@ -1773,6 +1779,17 @@ export function mountShell(): void {
     }
   })
   bulkResolveBox.addEventListener('input', (event) => {
+    const walkInInput = (event.target as HTMLElement).closest<HTMLInputElement>('[data-walkin-amount-key]')
+    if (walkInInput) {
+      const val = Number(walkInInput.value)
+      const key = walkInInput.dataset.walkinAmountKey!
+      if (walkInInput.value.trim() && Number.isFinite(val)) {
+        walkInAmounts.set(key, Math.min(WALKIN_MAX_AMOUNT, Math.max(0, val)))
+      } else {
+        walkInAmounts.delete(key)
+      }
+      return
+    }
     const amountEl = (event.target as HTMLElement).closest<HTMLInputElement>('[data-inline-pay-amount]')
     if (!amountEl) return
     const code = amountEl.dataset.inlinePayAmount!.toUpperCase()
@@ -1867,6 +1884,7 @@ export function mountShell(): void {
         status: nextStatus,
         code: undefined,
         studentName: undefined,
+        message: undefined,
       }
       bulkArmed = false
       renderBulkAnalysis()

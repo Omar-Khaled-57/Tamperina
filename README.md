@@ -61,7 +61,7 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 | `Esc` / backdrop click | Close the modal, close the find bar, or clear the selected student (in that order) |
 | `Ctrl+Alt+F` (on `/evaluation`) | Toggle the evaluation find bar; plain `Ctrl+F` stays with the browser |
 
-Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History lives only in the current page session and is intentionally cleared on reload.
+Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History is stored in `sessionStorage`, so it survives page reloads and navigation inside the platform and stays available until the tab or browser is closed. Ctrl+Z / Ctrl+Y work on any page where Tamperina runs as long as there is history.
 
 ### Evaluation tools (`/evaluation`)
 
@@ -95,8 +95,14 @@ On `/attendance/scan` (including `?lesson_id=...` links):
 1. Paste one student per line — a **code** or a **name**. Tamperina normalizes Arabic/Persian digits, removes duplicates, and ignores invalid tokens.
 2. Confirm the lesson id (prefilled from the open page). If you change it to a different lesson, open that lesson's scan page first.
 3. Click **معاينة وتحليل**. Codes are accepted directly; names are searched in the lesson's students.
-4. Resolve any names that are **not found**, **ambiguous**, or have **too many matches**: choose the correct student, edit the name and re-search, or **تجاهل (يدويًا)** to skip and handle manually.
-5. When everything is resolved or dropped, click **تسليح التنفيذ**, then **تنفيذ**.
+4. Resolve any names that are **not found**, **ambiguous**, or have **too many matches**: choose the correct student, edit the name and re-search, **تجاهل (يدويًا)** to skip, or **تسجيل طلاب جدد بدون كارت** to register them through the page's walk-in form.
+5. When everything is resolved, dropped, or registered as new students, click **تسليح التنفيذ**, then **تنفيذ**.
+
+#### Registering unresolved names as new students
+
+For names with no matching code (e.g. a student who forgot their card), the **تسجيل طلاب جدد بدون كارت** button next to **نسخ** / **تجاهل الكل** opens a preview. It lists each name with the amount that will be paid — the amount from the input line, or `45` (the form's own default) when none was written — and lets you edit each amount before confirming.
+
+Confirming fills the platform's own `#walkInForm` (using its **إضافة اسم آخر** button so the generated row keys and listeners stay intact) and submits it, creating the student and recording the collection in the school lesson account. Each successful name is marked **تم تسجيله طالبًا جديدًا**, removed from the attendance batch, and logged. These registrations are **not undoable** with `Ctrl+Z`; if the panel is collapsed, open it in the page first.
 
 Tamperina submits one student at a time (sequential scan-form loop in **سنتر** mode, parallel direct posts in **مدرسة** mode), waits for the shared observer's confirmation, and logs each result. **إيقاف** stops between students. Undo/Redo must be enabled so the run is recorded as one reversible batch. A post without observer confirmation is logged as an error and stops the run instead of being reported as an undoable success.
 
