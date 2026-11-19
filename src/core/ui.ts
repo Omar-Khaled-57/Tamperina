@@ -318,7 +318,42 @@ export function mountShell(): void {
 
   function renderFeature(controller: UndoRedoController): void {
     if (!controller.supported) {
-      featureList.innerHTML = `
+      // Append additional feature toggles (center modal, hide barcode)
+      const centerState = localStorage.getItem('tamperina_center_modal') === 'true';
+      const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true';
+
+      // Center payment modal toggle card
+      const centerCard = document.createElement('div');
+      centerCard.className = 'feature-card';
+      centerCard.innerHTML = `
+        <header class="feature-head">
+          <span class="feature-icon">${icons.center}</span>
+          <span class="feature-titles"><strong>مركز نافذة الدفع</strong></span>
+          <button type="button" class="switch" data-feature-id="center-modal" aria-checked="${centerState}" aria-label="تمركز نافذة الدفع">
+            <span></span>
+          </button>
+        </header>
+      `;
+      featureList.appendChild(centerCard);
+
+      // Hide barcode toggle card
+      const barcodeCard = document.createElement('div');
+      barcodeCard.className = 'feature-card';
+      barcodeCard.innerHTML = `
+        <header class="feature-head">
+          <span class="feature-icon">${icons.barcode}</span>
+          <span class="feature-titles"><strong>إخفاء الباركود</strong></span>
+          <button type="button" class="switch" data-feature-id="hide-barcode" aria-checked="${barcodeHidden}" aria-label="إخفاء أيقونة الباركود">
+            <span></span>
+          </button>
+        </header>
+      `;
+      featureList.appendChild(barcodeCard);
+
+      // Apply initial states
+      document.documentElement.classList.toggle('centered-payment-modal', centerState);
+      document.documentElement.classList.toggle('barcode-hidden', barcodeHidden);
+
         <div class="empty">
           ${icons.undo}
           <strong>التراجع غير متاح هنا</strong>

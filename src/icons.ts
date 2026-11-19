@@ -16,6 +16,7 @@ import x from 'lucide-static/icons/x.svg?raw'
 import building2 from 'lucide-static/icons/building-2.svg?raw'
 import school from 'lucide-static/icons/school.svg?raw'
 import wallet from 'lucide-static/icons/wallet.svg?raw'
+import barcode from 'lucide-static/icons/barcode.svg?raw'
 
 export const icons = {
   flip: flipHorizontal,
@@ -37,4 +38,5 @@ export const icons = {
   center: building2,
   school,
   payment: wallet,
+  barcode: barcode,
 } as const
