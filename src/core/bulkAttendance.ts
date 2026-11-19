@@ -383,15 +383,31 @@ export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<
 
   if (candidates.length === 1) {
     const c = candidates[0]
-    // Single partial match - resolve but keep note; UI can still show it.
-    if (candidateMatchesQuery(c, query)) {
+    return {
+      ...row,
+      status: 'resolved',
+      code: c.code,
+      studentName: c.name,
+      candidates,
+      message: `مطابقة واحدة: ${c.name} (${c.code || 'بدون كود'})`,
+    }
+  }
+
+  if (candidates.length === 2) {
+    const isFourDigit = (code: string): boolean => /^\d{4}$/.test(String(code || '').trim())
+    const a = candidates[0]
+    const b = candidates[1]
+    const a4 = isFourDigit(a.code)
+    const b4 = isFourDigit(b.code)
+    if (a4 !== b4) {
+      const chosen = a4 ? a : b
       return {
         ...row,
         status: 'resolved',
-        code: c.code,
-        studentName: c.name,
+        code: chosen.code,
+        studentName: chosen.name,
         candidates,
-        message: `مطابقة واحدة: ${c.name} (${c.code || 'بدون كود'})`,
+        message: `تم الاختيار تلقائيًا: ${chosen.name} (${chosen.code || 'بدون كود'})`,
       }
     }
   }

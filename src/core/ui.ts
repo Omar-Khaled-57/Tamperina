@@ -244,16 +244,6 @@ export function mountShell(): void {
               <div class="bulk-preview" data-bulk-preview-box>لم تتم المعاينة بعد.</div>
               <div class="bulk-resolve" data-bulk-resolve hidden></div>
 
-              <div class="bulk-pay-section" data-bulk-pay-section hidden>
-                <div class="bulk-pay-head">
-                  <strong>${icons.payment}<span>جدول المدفوعات — مدرسة</span></strong>
-                  <div class="bulk-pay-search-wrap">
-                    <input type="search" class="bulk-pay-search" data-bulk-pay-search placeholder="ابحث بالاسم أو الكود…" autocomplete="off" />
-                  </div>
-                </div>
-                <div class="bulk-pay-table" data-bulk-pay-table></div>
-              </div>
-
               <div class="history-head">
                 ${icons.history}
                 <strong>سجل التنفيذ</strong>
@@ -318,42 +308,27 @@ export function mountShell(): void {
 
   function renderFeature(controller: UndoRedoController): void {
     if (!controller.supported) {
-      // Append additional feature toggles (center modal, hide barcode)
-      const centerState = localStorage.getItem('tamperina_center_modal') === 'true';
-      const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true';
+      const centerState = localStorage.getItem('tamperina_center_modal') === 'true'
+      const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true'
 
-      // Center payment modal toggle card
-      const centerCard = document.createElement('div');
-      centerCard.className = 'feature-card';
-      centerCard.innerHTML = `
-        <header class="feature-head">
-          <span class="feature-icon">${icons.center}</span>
-          <span class="feature-titles"><strong>مركز نافذة الدفع</strong></span>
-          <button type="button" class="switch" data-feature-id="center-modal" aria-checked="${centerState}" aria-label="تمركز نافذة الدفع">
-            <span></span>
-          </button>
-        </header>
-      `;
-      featureList.appendChild(centerCard);
+      document.documentElement.classList.toggle('centered-payment-modal', centerState)
+      document.documentElement.classList.toggle('barcode-hidden', barcodeHidden)
 
-      // Hide barcode toggle card
-      const barcodeCard = document.createElement('div');
-      barcodeCard.className = 'feature-card';
-      barcodeCard.innerHTML = `
-        <header class="feature-head">
-          <span class="feature-icon">${icons.barcode}</span>
-          <span class="feature-titles"><strong>إخفاء الباركود</strong></span>
-          <button type="button" class="switch" data-feature-id="hide-barcode" aria-checked="${barcodeHidden}" aria-label="إخفاء أيقونة الباركود">
-            <span></span>
-          </button>
-        </header>
-      `;
-      featureList.appendChild(barcodeCard);
-
-      // Apply initial states
-      document.documentElement.classList.toggle('centered-payment-modal', centerState);
-      document.documentElement.classList.toggle('barcode-hidden', barcodeHidden);
-
+      featureList.innerHTML = `
+        <section class="feature-card">
+          <header class="feature-head">
+            <span class="feature-icon">${icons.center}</span>
+            <span class="feature-titles"><strong>مركز نافذة الدفع</strong></span>
+            <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="تمركز نافذة الدفع"><span></span></button>
+          </header>
+        </section>
+        <section class="feature-card">
+          <header class="feature-head">
+            <span class="feature-icon">${icons.barcode}</span>
+            <span class="feature-titles"><strong>إخفاء الباركود</strong></span>
+            <button type="button" class="switch" data-feature-id="hide-barcode" role="switch" aria-checked="${barcodeHidden}" aria-label="إخفاء أيقونة الباركود"><span></span></button>
+          </header>
+        </section>
         <div class="empty">
           ${icons.undo}
           <strong>التراجع غير متاح هنا</strong>
@@ -668,9 +643,6 @@ export function mountShell(): void {
   const bulkLogCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-log-count]')!
   const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
   const bulkModeBtns = Array.from(bulkRoot.querySelectorAll<HTMLButtonElement>('[data-bulk-mode-toggle] [data-mode]'))
-  const bulkPaySection = bulkRoot.querySelector<HTMLElement>('[data-bulk-pay-section]')!
-  const bulkPayTable = bulkRoot.querySelector<HTMLElement>('[data-bulk-pay-table]')!
-  const bulkPaySearch = bulkRoot.querySelector<HTMLInputElement>('[data-bulk-pay-search]')!
 
   let bulkParsed: ParseEntriesResult | null = null
   let bulkNameRows: NameRow[] = []
@@ -706,92 +678,64 @@ export function mountShell(): void {
     }
   }
 
-  /** Build / rebuild the payment override table rows for school mode. */
+  /** Seed/keep payment overrides for known entries (school mode). */
   function seedPaymentOverridesFromParsed(): void {
     if (!bulkParsed) return
     // Seed from direct codes
     for (const item of bulkParsed.codes) {
-      if (!item.payment) continue
       const code = item.code.toUpperCase()
-      if (!bulkPayOverrides.has(code)) {
+      if (item.payment && !bulkPayOverrides.has(code)) {
         bulkPayOverrides.set(code, {
           studentCode: code,
           status: item.payment.status,
           amountPaid: item.payment.amountPaid,
         })
+      } else if (!bulkPayOverrides.has(code)) {
+        bulkPayOverrides.set(code, { studentCode: code, status: 'paid' })
       }
     }
     // Seed from resolved names
     for (const row of bulkNameRows) {
-      if (!row.payment || row.status !== 'resolved' || !row.code) continue
+      if (row.status !== 'resolved' || !row.code) continue
       const code = row.code.toUpperCase()
-      if (!bulkPayOverrides.has(code)) {
+      if (row.payment && !bulkPayOverrides.has(code)) {
         bulkPayOverrides.set(code, {
           studentCode: code,
           status: row.payment.status,
           amountPaid: row.payment.amountPaid,
         })
+      } else if (!bulkPayOverrides.has(code)) {
+        bulkPayOverrides.set(code, { studentCode: code, status: 'paid' })
       }
     }
   }
 
-  function renderPayTable(filterQuery = ''): void {
-    if (bulkPayMode !== 'school') {
-      bulkPaySection.hidden = true
-      return
-    }
-    if (bulkParsed) seedPaymentOverridesFromParsed()
-    // Collect all resolved entries (codes + resolved names)
-    const allEntries: Array<{ code: string; label: string }> = []
-    if (bulkParsed) {
-      for (const item of bulkParsed.codes) allEntries.push({ code: item.code, label: item.raw })
-      for (const row of bulkNameRows) {
-        if (row.status === 'resolved' && row.code) {
-          allEntries.push({ code: row.code.toUpperCase(), label: row.studentName ?? row.query })
-        }
-      }
-    }
-    if (!allEntries.length) {
-      bulkPaySection.hidden = true
-      return
-    }
-    bulkPaySection.hidden = false
-
-    const nq = filterQuery.trim().toLowerCase()
-    const statusOptions: Array<{ value: PaymentStatus; label: string }> = [
-      { value: 'paid',       label: 'كامل' },
-      { value: 'partial',    label: 'جزئي' },
-      { value: 'discounted', label: 'مخفض' },
-      { value: 'forgotten',  label: 'نسي الفلوس' },
-    ]
-
-    const rows = allEntries.filter(({ code, label }) => {
-      if (!nq) return true
-      return code.toLowerCase().includes(nq) || label.toLowerCase().includes(nq)
-    })
-
-    if (!rows.length) {
-      bulkPayTable.innerHTML = `<div class="bulk-pay-empty">لا توجد نتائج للبحث.</div>`
-      return
-    }
-
-    bulkPayTable.innerHTML = rows.map(({ code, label }) => {
-      const override = bulkPayOverrides.get(code)
-      const status = override?.status ?? 'paid'
-      const amountPaid = override?.amountPaid ?? ''
-      const needsAmount = status === 'partial' || status === 'discounted'
-      const selectOpts = statusOptions.map((o) =>
-        `<option value="${o.value}"${o.value === status ? ' selected' : ''}>${o.label}</option>`
-      ).join('')
-      return `<div class="bulk-pay-row" data-pay-code="${escapeBulk(code)}">
-        <span class="bulk-pay-label" title="${escapeBulk(code)}">${escapeBulk(label)}<small>${escapeBulk(code)}</small></span>
-        <select class="bulk-pay-select" data-pay-status="${escapeBulk(code)}">${selectOpts}</select>
-        <input type="number" class="bulk-pay-amount" data-pay-amount="${escapeBulk(code)}"
-          placeholder="المبلغ" min="0" step="0.01"
-          value="${escapeBulk(String(amountPaid))}"
-          ${needsAmount ? '' : 'hidden'} />
-      </div>`
-    }).join('')
+  function renderInlinePaymentControls(code: string): string {
+    if (bulkPayMode !== 'school') return ''
+    const key = code.toUpperCase()
+    const override = bulkPayOverrides.get(key) ?? { studentCode: key, status: 'paid' as PaymentStatus }
+    const status = override.status
+    const amount = override.amountPaid
+    const needsAmount = status === 'partial' || status === 'discounted'
+    const selectOpts = ([
+      ['paid', 'كامل'],
+      ['partial', 'جزئي'],
+      ['discounted', 'مخفض/مجاني'],
+      ['forgotten', 'نسي الفلوس'],
+    ] as const).map(([val, lbl]) =>
+      `<option value="${val}" ${status === val ? 'selected' : ''}>${lbl}</option>`
+    ).join('')
+    return `<div class="bulk-inline-pay" data-inline-pay-code="${escapeBulk(key)}">
+      <label class="bulk-inline-pay-field">
+        <span>الدفع</span>
+        <select class="bulk-pay-select" data-inline-pay-status="${escapeBulk(key)}">${selectOpts}</select>
+      </label>
+      <label class="bulk-inline-pay-field" ${needsAmount ? '' : 'hidden'} data-inline-pay-amount-wrap="${escapeBulk(key)}">
+        <span>المبلغ</span>
+        <input type="number" class="bulk-pay-amount" data-inline-pay-amount="${escapeBulk(key)}"
+          placeholder="المبلغ" min="0" step="0.01" value="${amount != null ? escapeBulk(String(amount)) : ''}" />
+      </label>
+    </div>`
   }
 
   function setBulkBadge(text: string, className: string): void {
@@ -872,15 +816,36 @@ export function mountShell(): void {
   }
 
   function renderBulkResolve(): void {
-    const rows = bulkNameRows
-    if (!rows.length) {
+    if (bulkParsed && bulkPayMode === 'school') seedPaymentOverridesFromParsed()
+
+    const nameRows = bulkNameRows
+    const codeItems = (bulkPayMode === 'school' && bulkParsed) ? bulkParsed.codes : []
+    if (!nameRows.length && !codeItems.length) {
       bulkResolveBox.hidden = true
       bulkResolveBox.innerHTML = ''
       return
     }
 
-    bulkResolveBox.hidden = false
-    bulkResolveBox.innerHTML = rows.map((row) => {
+    let html = ''
+
+    if (codeItems.length) {
+      html += codeItems.map((item) => {
+        const pay = renderInlinePaymentControls(item.code)
+        const paymentNote = item.payment
+          ? `<div class="bulk-note-inline">من الإدخال: ${escapeBulk(item.payment.status === 'paid' ? 'كامل' : item.payment.status === 'partial' ? 'جزئي' : item.payment.status === 'discounted' ? 'مخفض/مجاني' : 'نسي الفلوس')}${item.payment.amountPaid != null ? ` — ${escapeBulk(String(item.payment.amountPaid))}` : ''}</div>`
+          : ''
+        return `<div class="bulk-resolve-item ok" data-code-item="${escapeBulk(item.code)}">
+          <div class="bulk-resolve-head">
+            <span class="bulk-resolve-name" dir="ltr">${escapeBulk(item.raw || item.code)}</span>
+            <span class="feature-badge on">${escapeBulk(item.code)}</span>
+          </div>
+          ${paymentNote}
+          ${pay}
+        </div>`
+      }).join('')
+    }
+
+    html += nameRows.map((row) => {
       const statusText: Record<NameRow['status'], string> = {
         ready: 'جاهز',
         resolved: row.studentName ? `تم التعرف: ${row.studentName}${row.code ? ` (${row.code})` : ''}` : 'تم التعرف',
@@ -922,6 +887,7 @@ export function mountShell(): void {
           </div>`
 
       const reason = row.message && row.status !== 'resolved' ? `<div class="bulk-resolve-reason">${escapeBulk(row.message)}</div>` : ''
+      const pay = (row.status === 'resolved' && row.code) ? renderInlinePaymentControls(row.code) : ''
 
       return `<div class="bulk-resolve-item ${cls}" data-resolve-key="${escapeBulk(row.key)}">
         <div class="bulk-resolve-head">
@@ -932,8 +898,12 @@ export function mountShell(): void {
         ${choicesHtml}
         ${row.status === 'loading' ? '' : editHtml}
         ${row.status === 'loading' ? '' : actions}
+        ${pay}
       </div>`
     }).join('')
+
+    bulkResolveBox.hidden = false
+    bulkResolveBox.innerHTML = html
   }
 
   function updateBulkButtons(): void {
@@ -1030,7 +1000,6 @@ export function mountShell(): void {
   function renderBulkAnalysis(): void {
     renderBulkAnalysisSummary()
     renderBulkResolve()
-    renderPayTable(bulkPaySearch?.value ?? '')
     updateBulkButtons()
   }
 
@@ -1042,7 +1011,6 @@ export function mountShell(): void {
     bulkNameRows = []
     bulkArmed = false
     bulkPayOverrides.clear()
-    bulkPaySection.hidden = true
     bulkPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة والتحليل قبل التنفيذ.'
     bulkResolveBox.hidden = true
     bulkResolveBox.innerHTML = ''
@@ -1299,57 +1267,58 @@ export function mountShell(): void {
       bulkArmed = false
       bulkPayOverrides.clear()
       updateBulkInputPlaceholder()
-      // Preserve analysis/resolution; just re-render to show/hide payment table.
+      // Preserve analysis/resolution; re-render to show/hide inline payment controls.
       if (bulkParsed) {
         renderBulkAnalysis()
       } else {
-        bulkPaySection.hidden = true
         updateBulkButtons()
       }
     })
   }
 
-  // ---- payment table interaction -------------------------------------------
-  bulkPaySearch.addEventListener('input', () => renderPayTable(bulkPaySearch.value))
-
-  bulkPayTable.addEventListener('change', (event) => {
+  // ---- inline payment interaction (school mode, per student item) ----------
+  bulkResolveBox.addEventListener('change', (event) => {
     const target = event.target as HTMLElement
-    // Status select changed
-    const statusEl = target.closest<HTMLSelectElement>('[data-pay-status]')
+    const statusEl = target.closest<HTMLSelectElement>('[data-inline-pay-status]')
     if (statusEl) {
-      const code = statusEl.dataset.payStatus!.toUpperCase()
+      const code = statusEl.dataset.inlinePayStatus!.toUpperCase()
       const newStatus = statusEl.value as PaymentStatus
       const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'paid' }
       existing.status = newStatus
-      bulkPayOverrides.set(code, existing)
-      // Show/hide amount field in this row
-      const row = statusEl.closest<HTMLElement>('[data-pay-code]')
-      const amountInput = row?.querySelector<HTMLInputElement>('[data-pay-amount]')
-      if (amountInput) {
-        const needsAmount = newStatus === 'partial' || newStatus === 'discounted'
-        amountInput.hidden = !needsAmount
-        if (needsAmount) amountInput.focus()
-        // If the status went back to paid/forgotten, clear amount
-        if (!needsAmount) {
-          amountInput.value = ''
-          delete existing.amountPaid
-        }
+      if (newStatus !== 'partial' && newStatus !== 'discounted') {
+        delete existing.amountPaid
       }
+      bulkPayOverrides.set(code, existing)
+      const wrap = bulkResolveBox.querySelector<HTMLElement>(`[data-inline-pay-amount-wrap="${CSS.escape(code)}"]`)
+      const amountInput = bulkResolveBox.querySelector<HTMLInputElement>(`[data-inline-pay-amount="${CSS.escape(code)}"]`)
+      if (wrap) wrap.hidden = !(newStatus === 'partial' || newStatus === 'discounted')
+      if (amountInput && !(newStatus === 'partial' || newStatus === 'discounted')) amountInput.value = ''
+      if (amountInput && (newStatus === 'partial' || newStatus === 'discounted')) amountInput.focus()
       bulkArmed = false
       updateBulkButtons()
       return
     }
-    // Amount input changed
-    const amountEl = target.closest<HTMLInputElement>('[data-pay-amount]')
+    const amountEl = target.closest<HTMLInputElement>('[data-inline-pay-amount]')
     if (amountEl) {
-      const code = amountEl.dataset.payAmount!.toUpperCase()
+      const code = amountEl.dataset.inlinePayAmount!.toUpperCase()
       const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'partial' }
       const val = parseFloat(amountEl.value)
-      existing.amountPaid = isNaN(val) ? undefined : val
+      existing.amountPaid = Number.isNaN(val) ? undefined : val
       bulkPayOverrides.set(code, existing)
       bulkArmed = false
       updateBulkButtons()
     }
+  })
+  bulkResolveBox.addEventListener('input', (event) => {
+    const amountEl = (event.target as HTMLElement).closest<HTMLInputElement>('[data-inline-pay-amount]')
+    if (!amountEl) return
+    const code = amountEl.dataset.inlinePayAmount!.toUpperCase()
+    const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'partial' }
+    const val = parseFloat(amountEl.value)
+    existing.amountPaid = Number.isNaN(val) ? undefined : val
+    bulkPayOverrides.set(code, existing)
+    bulkArmed = false
+    updateBulkButtons()
   })
 
   bulkResolveBox.addEventListener('click', (event) => {

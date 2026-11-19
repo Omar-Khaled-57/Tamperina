@@ -1369,3 +1369,26 @@
   color: var(--text-muted);
   font-size: 11px;
 }
+
+.bulk-inline-pay {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.bulk-inline-pay-field {
+  display: grid;
+  gap: 4px;
+}
+
+.bulk-inline-pay-field > span {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.bulk-inline-pay-field[hidden] {
+  display: none;
+}
