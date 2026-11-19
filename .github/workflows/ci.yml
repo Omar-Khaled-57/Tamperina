@@ -1,0 +1,80 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'vite.config.ts'
+      - 'tsconfig.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Capture pre-build versions
+        id: pre
+        run: |
+          echo "dist=$(node scripts/read-version.mjs dist/tamperina.user.js)" >> "$GITHUB_OUTPUT"
+          echo "pkg=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+          echo "hash=$(sha256sum dist/tamperina.user.js | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Typecheck, build and syntax-check userscripts
+        run: npm run check
+
+      - name: Bump patch version if the script changed
+        run: |
+          HASH=$(sha256sum dist/tamperina.user.js | cut -d ' ' -f 1)
+          if [ "$HASH" = "${{ steps.pre.outputs.hash }}" ]; then
+            echo "Generated userscripts are unchanged; nothing to publish."
+            exit 0
+          fi
+
+          if [ "${{ steps.pre.outputs.pkg }}" = "${{ steps.pre.outputs.dist }}" ]; then
+            echo "No manual version bump detected; bumping patch version."
+            node scripts/bump-version.mjs
+            npm install --package-lock-only --ignore-scripts
+            npm run check
+          else
+            echo "Using developer-bumped version ${{ steps.pre.outputs.pkg }}."
+          fi
+
+      - name: Commit generated userscripts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/tamperina.user.js dist/tamperina.dev.user.js package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "No generated changes to commit."
+            exit 0
+          fi
+          VERSION=$(node -p 'require("./package.json").version')
+          git commit -m "chore: build userscript v${VERSION} [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

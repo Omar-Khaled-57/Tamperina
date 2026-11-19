@@ -1,0 +1,804 @@
+:host {
+  all: initial;
+  direction: rtl;
+  font-family: Cairo, Tajawal, Tahoma, Arial, sans-serif;
+  color-scheme: dark;
+
+  /* CTZ-style tokens, recolored from teal to pale ginger. */
+  --bg: #17100b;
+  --surface: #241810;
+  --surface-alpha: rgba(36, 24, 16, 0.94);
+  --surface-2: #33241a;
+  --border: rgba(255, 226, 198, 0.16);
+  --border-60: rgba(255, 226, 198, 0.09);
+  --accent: #f2ceaa;
+  --accent-2: #d9a67c;
+  --accent-glow: rgba(242, 206, 170, 0.28);
+  --accent-ink: #2a1608;
+  --warning: #e8a24a;
+  --text: #f8efe7;
+  --text-muted: #b9a28f;
+  --danger: #e8796b;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.shell {
+  position: fixed;
+  left: 92%;
+  top: 88%;
+  transform: translate(-50%, -50%);
+  z-index: 2147483000;
+  user-select: none;
+}
+
+/* No card, no circle: just the sprite, like a sticker on the page. */
+.launcher {
+  position: relative;
+  width: var(--size, 120px);
+  height: var(--size, 120px);
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  touch-action: none;
+}
+
+.launcher:active,
+.launcher.dragging {
+  cursor: grabbing;
+}
+
+.flip {
+  width: 100%;
+  height: 100%;
+}
+
+.flip.mirrored {
+  transform: scaleX(-1);
+}
+
+.spin {
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 85%;
+  animation: tamp-idle 1.2s steps(1, end) infinite;
+}
+
+/* When paused, freeze on an exact pose instead of an arbitrary animation frame. */
+.spin.paused {
+  animation: none;
+}
+
+.spin.paused.frame-1 { transform: rotate(10deg); }
+.spin.paused.frame-2 { transform: rotate(-10deg); }
+.spin.paused.frame-3 { transform: rotate(0deg); }
+
+@keyframes tamp-idle {
+  0%, 49% { transform: rotate(10deg); }
+  50%, 100% { transform: rotate(-10deg); }
+}
+
+.mascot {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 6px 10px rgba(10, 6, 3, 0.48));
+  transition: filter 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.launcher:hover .mascot {
+  filter: drop-shadow(0 6px 10px rgba(10, 6, 3, 0.48))
+    drop-shadow(0 0 12px var(--accent-glow));
+}
+
+/* Sticker hover controls: compact rounded card, muted icons, accent when on. */
+.pill {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--border-60);
+  background: var(--surface-alpha);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  white-space: nowrap;
+}
+
+.shell:hover .pill,
+.shell:focus-within .pill {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.pill button,
+.pin,
+.icon-btn {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  border-radius: 8px;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.pill button {
+  width: 28px;
+  height: 28px;
+}
+
+.pill button:hover,
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.pill button.active {
+  background: rgba(242, 206, 170, 0.2);
+  color: var(--accent);
+}
+
+.sep {
+  width: 1px;
+  height: 16px;
+  margin-inline: 2px;
+  background: var(--border-60);
+}
+
+.frames {
+  display: flex;
+  gap: 3px;
+  padding-inline: 3px;
+  border-inline-start: 1px solid var(--border-60);
+}
+
+.frames button {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.pill button svg,
+.pin svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.2;
+}
+
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2;
+}
+
+.pin {
+  position: absolute;
+  top: -6px;
+  inset-inline-start: -6px;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  display: none;
+  background: var(--surface-alpha);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 7px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+
+.pin:hover {
+  background: var(--surface-2);
+}
+
+/* Click-through keeps a ghost of Tamperina visible, but lets clicks pass.
+   The restore button sits on the mascot's corner, not over its center. */
+.shell.clickthrough .launcher {
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+.shell.clickthrough .pill {
+  display: none;
+}
+
+.shell.clickthrough .pin {
+  display: grid;
+}
+
+/* Modal — CTZ's frosted surface panel with a ginger accent. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147482999;
+  background: rgba(6, 4, 3, 0.66);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.modal {
+  width: min(520px, 94vw);
+  max-height: 88vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--surface-alpha);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 28px var(--accent-glow);
+  border: 1px solid var(--border-60);
+  direction: rtl;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 6px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-dot {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 14px var(--accent-glow);
+}
+
+.brand strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.brand small {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+}
+
+/* Segmented tabs, same shape as CTZ's sticker picker. */
+.tabs {
+  display: flex;
+  gap: 3px;
+  margin: 6px 16px 0;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--border-60);
+  background: rgba(51, 36, 26, 0.4);
+}
+
+.tab {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.tab svg {
+  width: 14px;
+  height: 14px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+}
+
+.panels {
+  padding: 16px;
+  min-height: 180px;
+}
+
+.empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  text-align: center;
+  gap: 10px;
+  min-height: 150px;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: 16px;
+  background: rgba(255, 226, 198, 0.03);
+  color: var(--text-muted);
+}
+
+.empty svg {
+  width: 34px;
+  height: 34px;
+  color: var(--accent-2);
+}
+
+.empty strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.empty p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  max-width: 300px;
+}
+
+.locked-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.locked-note svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* M1 feature card — the first real toggle in the Toggles tab. */
+.feature-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 226, 198, 0.035);
+}
+
+.feature-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.feature-icon,
+.action-btn svg,
+.history-head svg,
+.feature-note svg {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.feature-icon {
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(242, 206, 170, 0.14);
+  color: var(--accent);
+}
+
+.feature-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.feature-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.feature-titles strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.feature-titles small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.feature-badge {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.feature-badge.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.feature-badge.off {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.feature-badge.busy {
+  background: rgba(232, 162, 74, 0.2);
+  color: var(--warning);
+}
+
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.switch span {
+  position: absolute;
+  top: 2px;
+  inset-inline-start: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.18s ease, background-color 0.18s ease;
+}
+
+.switch[aria-checked='true'] {
+  background: rgba(242, 206, 170, 0.28);
+  border-color: var(--accent);
+}
+
+.switch[aria-checked='true'] span {
+  background: var(--accent);
+  transform: translateX(-16px);
+}
+
+.switch:disabled,
+.action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.feature-desc {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.8;
+}
+
+.feature-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.action-btn {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.action-btn:not(:disabled):hover {
+  background: rgba(242, 206, 170, 0.16);
+  border-color: var(--accent);
+}
+
+.action-btn svg {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+}
+
+.action-btn kbd {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.26);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  direction: ltr;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-top: 2px;
+  border-top: 1px solid var(--border-60);
+  color: var(--text-muted);
+}
+
+.history-head svg {
+  width: 14px;
+  height: 14px;
+  color: var(--accent-2);
+}
+
+.history-head strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.history-head small {
+  margin-inline-start: auto;
+  font-size: 10px;
+}
+
+.history-list {
+  display: grid;
+  gap: 5px;
+  max-height: 168px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.history-time {
+  flex-shrink: 0;
+  color: var(--accent-2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-text {
+  min-width: 0;
+}
+
+.history-text strong,
+.history-text small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-text strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.history-text small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.history-empty {
+  padding: 12px;
+  border: 1px dashed var(--border-60);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.feature-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.feature-note svg {
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+  color: var(--warning);
+}
+
+/* Toasts — CTZ-style frosted cards with a large Rina sticker icon.
+   Sits on the inline-start side (right in RTL), clear of the modal's left edge. */
+.toasts {
+  position: fixed;
+  inset-inline-start: 20px;
+  bottom: 20px;
+  z-index: 2147483001;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(420px, calc(100vw - 32px));
+  padding: 10px 12px 10px 16px;
+  border: 1px solid var(--border-60);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 16px;
+  background: var(--surface-alpha);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.toast.leaving {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.toast-error { border-inline-start-color: var(--danger); }
+.toast-warning { border-inline-start-color: var(--warning); }
+
+.toast-icon {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  object-fit: contain;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.45));
+}
+
+.toast-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-content strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.toast-content small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.toast-close {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.toast-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.toast-close svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+}
+
+@media (max-width: 560px) {
+  .modal {
+    max-height: 92dvh;
+    border-radius: 22px 22px 0 0;
+    border-bottom: 0;
+  }
+
+  .backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+
+  .pill,
+  .launcher,
+  .mascot,
+  .toast {
+    transition: none;
+  }
+}

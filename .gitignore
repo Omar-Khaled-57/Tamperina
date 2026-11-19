@@ -1,0 +1,8 @@
+# Local-only scratch space: plans, notes, experiments. Never committed.
+dev/
+
+# Dependencies
+node_modules/
+
+# Note: dist/ is intentionally NOT ignored.
+# The committed raw tamperina.user.js is what Tampermonkey installs/updates from.
