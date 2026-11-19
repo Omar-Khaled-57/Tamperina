@@ -32,6 +32,51 @@ const HOST_ID = 'tamperina-root'
 const DRAG_THRESHOLD = 5
 const HOTKEY_RESTORE = 'Alt+Shift+T'
 let cairoFontReady = false
+let toggleEffectsReady = false
+
+function ensureToggleEffectsStyle(): void {
+  if (toggleEffectsReady || document.getElementById('tamperina-toggle-effects')) {
+    toggleEffectsReady = true
+    return
+  }
+  toggleEffectsReady = true
+  const style = document.createElement('style')
+  style.id = 'tamperina-toggle-effects'
+  style.textContent = `
+/* Tamperina toggle effects (page-level) */
+.centered-payment-modal .modal,
+.centered-payment-modal .modal-dialog,
+.centered-payment-modal [class*="payment-modal"],
+.centered-payment-modal [class*="PaymentModal"],
+.centered-payment-modal dialog[open],
+.centered-payment-modal .swal2-popup,
+.centered-payment-modal .swal2-container {
+  position: fixed !important;
+  top: 50% !important;
+  left: 50% !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: translate(-50%, -50%) !important;
+  margin: 0 !important;
+}
+.centered-payment-modal .modal-backdrop,
+.centered-payment-modal .swal2-container {
+  inset: 0 !important;
+}
+.barcode-hidden [id*="barcode" i]:not(input):not(textarea):not(select),
+.barcode-hidden [class*="barcode" i]:not(input):not(textarea):not(select),
+.barcode-hidden [data-barcode],
+.barcode-hidden .fa-barcode,
+.barcode-hidden .bi-upc-scan,
+.barcode-hidden button[title*="باركود" i],
+.barcode-hidden button[aria-label*="باركود" i],
+.barcode-hidden a[title*="باركود" i],
+.barcode-hidden a[aria-label*="باركود" i] {
+  display: none !important;
+}
+`
+  ;(document.head || document.documentElement).appendChild(style)
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -106,6 +151,7 @@ function ensureCairoFont(): void {
 
 export function mountShell(): void {
   ensureCairoFont()
+  ensureToggleEffectsStyle()
   if (document.getElementById(HOST_ID)) return
 
   const host = document.createElement('div')
@@ -307,6 +353,7 @@ export function mountShell(): void {
   }
 
   function renderFeature(controller: UndoRedoController): void {
+    ensureToggleEffectsStyle()
     const centerState = localStorage.getItem('tamperina_center_modal') === 'true'
     const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true'
 
@@ -317,8 +364,8 @@ export function mountShell(): void {
       <section class="feature-card">
         <header class="feature-head">
           <span class="feature-icon">${icons.center}</span>
-          <span class="feature-titles"><strong>مركز نافذة الدفع</strong></span>
-          <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="تمركز نافذة الدفع"><span></span></button>
+          <span class="feature-titles"><strong>مركِز نافذة الدفع</strong></span>
+          <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="تمركُز نافذة الدفع"><span></span></button>
         </header>
       </section>
       <section class="feature-card">
@@ -612,7 +659,11 @@ export function mountShell(): void {
       void undoRedo.redo()
     } else if (btn.hasAttribute('data-feature-id')) {
       const featureId = btn.dataset.featureId
-      const storageKey = `tamperina_${featureId}`
+      const storageKey = featureId === 'center-modal'
+        ? 'tamperina_center_modal'
+        : featureId === 'hide-barcode'
+          ? 'tamperina_barcode_hidden'
+          : `tamperina_${featureId}`
       const current = localStorage.getItem(storageKey) === 'true'
       const newState = !current
       localStorage.setItem(storageKey, String(newState))

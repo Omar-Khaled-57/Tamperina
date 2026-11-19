@@ -443,6 +443,11 @@
 }
 
 /* M1 feature card — the first real toggle in the Toggles tab. */
+.feature-list {
+  display: grid;
+  gap: 10px;
+}
+
 .feature-card {
   display: grid;
   gap: 12px;
