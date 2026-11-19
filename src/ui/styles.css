@@ -1392,3 +1392,37 @@
 .bulk-inline-pay-field[hidden] {
   display: none;
 }
+
+.bulk-undecided-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(232, 162, 74, 0.32);
+  border-radius: 12px;
+  background: rgba(232, 162, 74, 0.08);
+}
+
+.bulk-undecided-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bulk-undecided-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.bulk-undecided-title strong {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.bulk-resolve-group {
+  display: grid;
+  gap: 10px;
+}

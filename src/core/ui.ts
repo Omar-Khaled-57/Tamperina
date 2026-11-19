@@ -307,33 +307,47 @@ export function mountShell(): void {
   }
 
   function renderFeature(controller: UndoRedoController): void {
+    const centerState = localStorage.getItem('tamperina_center_modal') === 'true'
+    const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true'
+
+    document.documentElement.classList.toggle('centered-payment-modal', centerState)
+    document.documentElement.classList.toggle('barcode-hidden', barcodeHidden)
+
+    const generalTogglesHtml = `
+      <section class="feature-card">
+        <header class="feature-head">
+          <span class="feature-icon">${icons.center}</span>
+          <span class="feature-titles"><strong>مركز نافذة الدفع</strong></span>
+          <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="تمركز نافذة الدفع"><span></span></button>
+        </header>
+      </section>
+      <section class="feature-card">
+        <header class="feature-head">
+          <span class="feature-icon">${icons.barcode}</span>
+          <span class="feature-titles"><strong>إخفاء الباركود</strong></span>
+          <button type="button" class="switch" data-feature-id="hide-barcode" role="switch" aria-checked="${barcodeHidden}" aria-label="إخفاء أيقونة الباركود"><span></span></button>
+        </header>
+      </section>
+    `
+
     if (!controller.supported) {
-      const centerState = localStorage.getItem('tamperina_center_modal') === 'true'
-      const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true'
-
-      document.documentElement.classList.toggle('centered-payment-modal', centerState)
-      document.documentElement.classList.toggle('barcode-hidden', barcodeHidden)
-
       featureList.innerHTML = `
+        ${generalTogglesHtml}
         <section class="feature-card">
           <header class="feature-head">
-            <span class="feature-icon">${icons.center}</span>
-            <span class="feature-titles"><strong>مركز نافذة الدفع</strong></span>
-            <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="تمركز نافذة الدفع"><span></span></button>
+            <span class="feature-icon">${icons.undo}</span>
+            <span class="feature-titles">
+              <strong>التراجع وإعادة التنفيذ</strong>
+              <small>غير متاح في هذه الصفحة</small>
+            </span>
+            <span class="feature-badge off">غير متاح</span>
+            <button type="button" class="switch" data-feature-toggle role="switch"
+              aria-checked="${controller.enabled}" aria-label="تشغيل أو إيقاف التراجع" disabled><span></span></button>
           </header>
+          <p class="feature-desc">
+            يعمل هذا المفتاح في صفحتي الحضور والتقييم فقط.
+          </p>
         </section>
-        <section class="feature-card">
-          <header class="feature-head">
-            <span class="feature-icon">${icons.barcode}</span>
-            <span class="feature-titles"><strong>إخفاء الباركود</strong></span>
-            <button type="button" class="switch" data-feature-id="hide-barcode" role="switch" aria-checked="${barcodeHidden}" aria-label="إخفاء أيقونة الباركود"><span></span></button>
-          </header>
-        </section>
-        <div class="empty">
-          ${icons.undo}
-          <strong>التراجع غير متاح هنا</strong>
-          <p>يعمل هذا المفتاح في صفحتي الحضور والتقييم فقط.</p>
-        </div>
       `
       return
     }
@@ -358,6 +372,7 @@ export function mountShell(): void {
       : `<div class="history-empty">لا توجد عمليات مسجلة في هذه الصفحة بعد.</div>`
 
     featureList.innerHTML = `
+      ${generalTogglesHtml}
       <section class="feature-card">
         <header class="feature-head">
           <span class="feature-icon">${icons.undo}</span>
@@ -831,6 +846,8 @@ export function mountShell(): void {
     if (bulkParsed && bulkPayMode === 'school') seedPaymentOverridesFromParsed()
 
     const nameRows = bulkNameRows
+    const undecided = nameRows.filter((row) => row.status !== 'resolved' && row.status !== 'dropped')
+    const decidedNames = nameRows.filter((row) => row.status === 'resolved' || row.status === 'dropped')
     const codeItems = (bulkPayMode === 'school' && bulkParsed) ? bulkParsed.codes : []
     if (!nameRows.length && !codeItems.length) {
       bulkResolveBox.hidden = true
@@ -838,26 +855,7 @@ export function mountShell(): void {
       return
     }
 
-    let html = ''
-
-    if (codeItems.length) {
-      html += codeItems.map((item) => {
-        const pay = renderInlinePaymentControls(item.code)
-        const paymentNote = item.payment
-          ? `<div class="bulk-note-inline">من الإدخال: ${escapeBulk(item.payment.status === 'paid' ? 'كامل' : item.payment.status === 'partial' ? 'جزئي' : item.payment.status === 'discounted' ? 'مخفض/مجاني' : 'نسي الفلوس')}${item.payment.amountPaid != null ? ` — ${escapeBulk(String(item.payment.amountPaid))}` : ''}</div>`
-          : ''
-        return `<div class="bulk-resolve-item ok" data-code-item="${escapeBulk(item.code)}">
-          <div class="bulk-resolve-head">
-            <span class="bulk-resolve-name" dir="ltr">${escapeBulk(item.raw || item.code)}</span>
-            <span class="feature-badge on">${escapeBulk(item.code)}</span>
-          </div>
-          ${paymentNote}
-          ${pay}
-        </div>`
-      }).join('')
-    }
-
-    html += nameRows.map((row) => {
+    const renderNameRow = (row: NameRow): string => {
       const statusText: Record<NameRow['status'], string> = {
         ready: 'جاهز',
         resolved: row.studentName ? `تم التعرف: ${row.studentName}${row.code ? ` (${row.code})` : ''}` : 'تم التعرف',
@@ -912,7 +910,50 @@ export function mountShell(): void {
         ${row.status === 'loading' ? '' : actions}
         ${pay}
       </div>`
-    }).join('')
+    }
+
+    let html = ''
+
+    if (undecided.length) {
+      const undecidedText = undecided.map((row) => row.raw || row.query).join('\n')
+      html += `<div class="bulk-undecided-section">
+        <div class="bulk-undecided-head">
+          <div class="bulk-undecided-title">
+            <strong>طلاب غير محلولين</strong>
+            <span class="feature-badge busy">${undecided.length}</span>
+          </div>
+          <div class="bulk-resolve-actions">
+            <button type="button" class="bulk-mini-btn" data-bulk-copy-undecided data-copy-text="${escapeBulk(undecidedText)}">نسخ</button>
+            <button type="button" class="bulk-mini-btn" data-resolve-action="drop-all">تجاهل الكل</button>
+          </div>
+        </div>
+        <div class="bulk-note-inline">يمكنك نسخهم للتعامل معهم يدويًا أو تجاهلهم جميعًا والمتابعة بالباقي.</div>
+        ${undecided.map(renderNameRow).join('')}
+      </div>`
+    }
+
+    if (codeItems.length) {
+      html += `<div class="bulk-resolve-group">`
+      html += codeItems.map((item) => {
+        const pay = renderInlinePaymentControls(item.code)
+        const paymentNote = item.payment
+          ? `<div class="bulk-note-inline">من الإدخال: ${escapeBulk(item.payment.status === 'paid' ? 'كامل' : item.payment.status === 'partial' ? 'جزئي' : item.payment.status === 'discounted' ? 'مخفض/مجاني' : 'نسي الفلوس')}${item.payment.amountPaid != null ? ` — ${escapeBulk(String(item.payment.amountPaid))}` : ''}</div>`
+          : ''
+        return `<div class="bulk-resolve-item ok" data-code-item="${escapeBulk(item.code)}">
+          <div class="bulk-resolve-head">
+            <span class="bulk-resolve-name" dir="ltr">${escapeBulk(item.raw || item.code)}</span>
+            <span class="feature-badge on">${escapeBulk(item.code)}</span>
+          </div>
+          ${paymentNote}
+          ${pay}
+        </div>`
+      }).join('')
+      html += `</div>`
+    }
+
+    if (decidedNames.length) {
+      html += `<div class="bulk-resolve-group">${decidedNames.map(renderNameRow).join('')}</div>`
+    }
 
     bulkResolveBox.hidden = false
     bulkResolveBox.innerHTML = html
@@ -1334,10 +1375,52 @@ export function mountShell(): void {
   })
 
   bulkResolveBox.addEventListener('click', (event) => {
+    const copyBtn = (event.target as Element).closest<HTMLButtonElement>('[data-bulk-copy-undecided]')
+    if (copyBtn) {
+      const text = copyBtn.dataset.copyText || ''
+      const copy = async (): Promise<void> => {
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text)
+          } else {
+            const ta = document.createElement('textarea')
+            ta.value = text
+            ta.style.position = 'fixed'
+            ta.style.opacity = '0'
+            document.body.appendChild(ta)
+            ta.focus()
+            ta.select()
+            document.execCommand('copy')
+            ta.remove()
+          }
+          toast({ title: 'تم النسخ', description: 'تم نسخ الطلاب غير المحلولين.', variant: 'applied' })
+        } catch {
+          toast({ title: 'تعذّر النسخ', description: 'انسخهم يدويًا.', variant: 'warning' })
+        }
+      }
+      void copy()
+      return
+    }
+
     const btn = (event.target as Element).closest<HTMLButtonElement>('[data-resolve-action]')
     if (!btn) return
-    const key = btn.dataset.key || ''
     const action = btn.dataset.resolveAction
+
+    if (action === 'drop-all') {
+      let changed = false
+      bulkNameRows = bulkNameRows.map((row) => {
+        if (row.status === 'resolved' || row.status === 'dropped') return row
+        changed = true
+        return { ...row, status: 'dropped' as const, message: 'تم التجاهل — سيتم إدخاله يدويًا.' }
+      })
+      if (changed) {
+        bulkArmed = false
+        renderBulkAnalysis()
+      }
+      return
+    }
+
+    const key = btn.dataset.key || ''
     const index = bulkNameRows.findIndex((row) => row.key === key)
     if (index < 0) return
 
