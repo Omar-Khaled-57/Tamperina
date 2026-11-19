@@ -569,7 +569,7 @@
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.3);
   cursor: pointer;
-  transition: background-color 0.18s ease, border-color 0.18s ease;
+  transition: background-color 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease, opacity 0.22s ease;
 }
 
 .switch span {
@@ -580,7 +580,7 @@
   height: 16px;
   border-radius: 50%;
   background: var(--text-muted);
-  transition: transform 0.18s ease, background-color 0.18s ease;
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.22s ease;
 }
 
 .switch[aria-checked='true'] {

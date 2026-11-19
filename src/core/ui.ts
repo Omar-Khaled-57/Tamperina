@@ -751,7 +751,9 @@ export function mountShell(): void {
     if (!btn || btn.disabled) return
     event.stopPropagation()
     if (btn.hasAttribute('data-feature-toggle')) {
-      undoRedo.setEnabled(!undoRedo.enabled)
+      const next = !undoRedo.enabled
+      btn.setAttribute('aria-checked', String(next))
+      window.setTimeout(() => undoRedo.setEnabled(next), 180)
     } else if (btn.hasAttribute('data-undo')) {
       void undoRedo.undo()
     } else if (btn.hasAttribute('data-redo')) {
@@ -759,7 +761,9 @@ export function mountShell(): void {
     } else if (btn.hasAttribute('data-feature-id')) {
       const featureId = btn.dataset.featureId ?? ''
       if (isEvaluationFeatureId(featureId)) {
-        setFeatureEnabled(featureId, !isFeatureEnabled(featureId))
+        const next = !isFeatureEnabled(featureId)
+        btn.setAttribute('aria-checked', String(next))
+        window.setTimeout(() => setFeatureEnabled(featureId, next), 180)
         return
       }
       const storageKey = featureId === 'center-modal'
@@ -875,6 +879,9 @@ export function mountShell(): void {
   let bulkLogRows: BulkRowResult[] = []
   let bulkAnalysisToken = 0
   let bulkPayMode: PaymentMode = 'center'
+  // Walk-in registration preview (names with no matching code)
+  let walkInPreviewOpen = false
+  const walkInAmounts = new Map<string, number>()
   // Map: uppercase code → override (for school mode)
   const bulkPayOverrides = new Map<string, PaymentOverride>()
 
@@ -1034,7 +1041,162 @@ export function mountShell(): void {
 
   function unresolvedNameRows(): NameRow[] {
     return bulkNameRows.filter((row) =>
-      row.status !== 'resolved' && row.status !== 'dropped')
+      row.status !== 'resolved' && row.status !== 'dropped' && row.status !== 'walk-in')
+  }
+
+  const WALKIN_DEFAULT_AMOUNT = 45
+  const WALKIN_MAX_AMOUNT = 999999.99
+
+  function walkInAmountFor(row: NameRow): number {
+    const stored = walkInAmounts.get(row.key)
+    if (stored != null) return stored
+    const parsed = row.payment?.amountPaid
+    const amount = parsed == null || !Number.isFinite(parsed) ? WALKIN_DEFAULT_AMOUNT : parsed
+    return Math.min(WALKIN_MAX_AMOUNT, Math.max(0, amount))
+  }
+
+  function formatWalkInAmount(amount: number): string {
+    return Number.isInteger(amount) ? String(amount) : amount.toFixed(2)
+  }
+
+  function walkInPageHidden(el: HTMLElement): boolean {
+    const style = getComputedStyle(el)
+    return el.hidden || el.offsetParent === null
+      || style.display === 'none' || style.visibility === 'hidden'
+  }
+
+  /** Walk-in panel can be collapsed; try the page's own toggle before filling it. */
+  function ensureWalkInFormVisible(form: HTMLElement): boolean {
+    if (!walkInPageHidden(form)) return true
+    const label = /طلاب جدد بدون كارت|بدون كارت|walk.?in/i
+    const toggle = Array.from(document.querySelectorAll<HTMLElement>('button, a, [role="button"], [aria-controls]'))
+      .find((el) => el.getAttribute('aria-controls') === 'walkInForm'
+        || (el.getAttribute('data-bs-target') || '').includes('walkIn')
+        || label.test(el.textContent || ''))
+    if (toggle) toggle.click()
+    return !walkInPageHidden(form)
+  }
+
+  function waitForWalkInState(stateEl: HTMLElement, timeoutMs = 12000): Promise<string> {
+    const initial = (stateEl.textContent || '').trim()
+    if (initial && !/جار|جرى|جاري|loading|processing/i.test(initial)) {
+      return Promise.resolve(initial)
+    }
+    return new Promise((resolve) => {
+      let done = false
+      const finish = (text: string): void => {
+        if (done) return
+        done = true
+        observer.disconnect()
+        window.clearTimeout(timer)
+        resolve(text)
+      }
+      const read = (): string => (stateEl.textContent || '').trim()
+      const observer = new MutationObserver(() => {
+        const text = read()
+        if (text && !/جار|جرى|جاري|loading|processing/i.test(text)) finish(text)
+      })
+      observer.observe(stateEl, { childList: true, subtree: true, characterData: true })
+      const timer = window.setTimeout(() => finish(read() || 'انتهى الإرسال — راجع الصفحة.'), timeoutMs)
+    })
+  }
+
+  /** Fill the page's own "طلاب جدد بدون كارت" form and submit it. */
+  async function registerWalkInStudents(): Promise<void> {
+    const rows = unresolvedNameRows()
+    if (!rows.length) return
+
+    const form = document.getElementById('walkInForm') as HTMLFormElement | null
+    const rowsBox = document.getElementById('walkInRows') as HTMLElement | null
+    const addBtn = document.getElementById('addWalkInRow') as HTMLButtonElement | null
+    const stateEl = document.getElementById('walkInState') as HTMLElement | null
+    if (!form || !rowsBox || !addBtn || !stateEl) {
+      toast({ title: 'النموذج غير موجود', description: 'افتح لوحة «طلاب جدد بدون كارت» في صفحة الحضور أولًا.', variant: 'warning' })
+      return
+    }
+    if (!ensureWalkInFormVisible(form)) {
+      toast({ title: 'اللوحة مخفية', description: 'افتح لوحة «طلاب جدد بدون كارت» يدويًا ثم حاول again.', variant: 'warning' })
+      return
+    }
+
+    const pageRows = (): HTMLElement[] =>
+      Array.from(rowsBox.querySelectorAll<HTMLElement>('.walkin-row'))
+
+    // Match the page's row count to our list. Use its own buttons so the
+    // generated data-walkin-key UUIDs and listeners stay in sync.
+    while (pageRows().length < rows.length) {
+      const before = pageRows().length
+      addBtn.click()
+      if (pageRows().length <= before) break
+    }
+    const current = pageRows()
+    for (let i = current.length - 1; i >= rows.length; i--) {
+      const remove = current[i].querySelector<HTMLButtonElement>('.walkin-remove')
+      if (remove) remove.click()
+      if (current[i].parentNode) current[i].remove()
+    }
+
+    const targets = pageRows().slice(0, rows.length)
+    if (targets.length !== rows.length) {
+      toast({ title: 'تعذّر تجهيز النموذج', description: 'لم يتمكن تمبرينا من إضافة عدد الصفوف المطلوب.', variant: 'warning' })
+      return
+    }
+
+    targets.forEach((target, index) => {
+      const row = rows[index]
+      const name = row.query || row.studentName || row.raw
+      const nameInput = target.querySelector<HTMLInputElement>('[data-walkin-name]')
+      const amountInput = target.querySelector<HTMLInputElement>('[data-walkin-amount]')
+      if (nameInput) {
+        nameInput.value = name
+        nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+        nameInput.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+      if (amountInput) {
+        amountInput.value = formatWalkInAmount(walkInAmountFor(row))
+        amountInput.dispatchEvent(new Event('input', { bubbles: true }))
+        amountInput.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+    })
+
+    stateEl.textContent = ''
+    const submitBtn = form.querySelector<HTMLButtonElement>('button[type="submit"]')
+    if (!submitBtn) {
+      toast({ title: 'تعذّر الإرسال', description: 'زر «تسجيل الطلاب والتحصيل» غير موجود.', variant: 'warning' })
+      return
+    }
+    submitBtn.click()
+    const stateText = await waitForWalkInState(stateEl)
+
+    const failed = /خطأ|فشل|تعذّر|تعذر|غير صالح|لم يتم|لم تُسجّل|لم تسجل|error|failed/i.test(stateText)
+    if (failed) {
+      toast({ title: 'تعذّر تسجيل الطلاب الجدد', description: stateText, variant: 'error', duration: 9000 })
+      return
+    }
+
+    const now = Date.now()
+    for (const row of rows) {
+      const name = row.query || row.studentName || row.raw
+      bulkNameRows = bulkNameRows.map((item) => item.key === row.key
+        ? { ...item, status: 'walk-in' as const, message: stateText }
+        : item)
+      appendBulkRow({
+        code: name,
+        label: 'طالب جديد بدون كارت',
+        status: 'created',
+        message: stateText,
+        at: now,
+      })
+    }
+    walkInPreviewOpen = false
+    bulkArmed = false
+    renderBulkAnalysis()
+    toast({
+      title: 'تم تسجيل الطلاب الجدد',
+      description: `${rows.length} طالب — ${stateText}. لا يمكن التراجع عنها، وقد استُبعدت من دفعة الحضور.`,
+      variant: 'applied',
+      duration: 9000,
+    })
   }
 
   function readyToArm(): boolean {
@@ -1050,8 +1212,10 @@ export function mountShell(): void {
     if (bulkParsed && bulkPayMode === 'school') seedPaymentOverridesFromParsed()
 
     const nameRows = bulkNameRows
-    const undecided = nameRows.filter((row) => row.status !== 'resolved' && row.status !== 'dropped')
-    const decidedNames = nameRows.filter((row) => row.status === 'resolved' || row.status === 'dropped')
+    const notHandled = (row: NameRow): boolean =>
+      row.status !== 'resolved' && row.status !== 'dropped' && row.status !== 'walk-in'
+    const undecided = nameRows.filter(notHandled)
+    const decidedNames = nameRows.filter((row) => !notHandled(row))
     const codeItems = (bulkPayMode === 'school' && bulkParsed) ? bulkParsed.codes : []
     if (!nameRows.length && !codeItems.length) {
       bulkResolveBox.hidden = true
@@ -1067,10 +1231,11 @@ export function mountShell(): void {
         'not-found': 'لم يتم العثور على الاسم',
         'too-many': 'نتائج كثيرة جدًا',
         dropped: 'تم التجاهل — ستدخله يدويًا',
+        'walk-in': row.message ? `تم تسجيله طالبًا جديدًا — ${row.message}` : 'تم تسجيله طالبًا جديدًا بدون كارت',
         loading: 'جارٍ البحث…',
         error: 'تعذّر البحث',
       }
-      const cls = row.status === 'resolved' ? 'ok'
+      const cls = row.status === 'resolved' || row.status === 'walk-in' ? 'ok'
         : row.status === 'dropped' ? 'drop'
         : row.status === 'loading' ? ''
         : (row.status === 'ready' ? 'ok' : '')
@@ -1088,12 +1253,12 @@ export function mountShell(): void {
           </button>`).join('')}${row.candidates.length > 12 ? `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>` : ''}</div>`
       }
 
-      const editHtml = row.status === 'dropped' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
+      const editHtml = row.status === 'dropped' || row.status === 'walk-in' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
           <input type="text" class="bulk-input" data-resolve-edit="${escapeBulk(row.key)}" value="${escapeBulk(row.query)}" placeholder="عدّل الاسم ثم أعد البحث" />
           <button type="button" class="bulk-mini-btn" data-resolve-action="research" data-key="${escapeBulk(row.key)}">إعادة بحث</button>
         </div>`
 
-      const actions = row.status === 'dropped'
+      const actions = row.status === 'dropped' || row.status === 'walk-in'
         ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-resolve-action="undrop" data-key="${escapeBulk(row.key)}">استرجاع</button></div>`
         : `<div class="bulk-resolve-actions">
             ${row.status === 'resolved' ? `<button type="button" class="bulk-mini-btn" data-resolve-action="change" data-key="${escapeBulk(row.key)}">تغيير</button>` : ''}
@@ -1129,9 +1294,25 @@ export function mountShell(): void {
           <div class="bulk-resolve-actions">
             <button type="button" class="bulk-mini-btn" data-bulk-copy-undecided data-copy-text="${escapeBulk(undecidedText)}">نسخ</button>
             <button type="button" class="bulk-mini-btn" data-resolve-action="drop-all">تجاهل الكل</button>
+            <button type="button" class="bulk-mini-btn" data-walkin-toggle aria-expanded="${walkInPreviewOpen}">تسجيل طلاب جدد بدون كارت</button>
           </div>
         </div>
-        <div class="bulk-note-inline">يمكنك نسخهم للتعامل معهم يدويًا أو تجاهلهم جميعًا والمتابعة بالباقي.</div>
+        <div class="bulk-note-inline">يمكنك نسخهم للتعامل معهم يدويًا، أو تجاهلهم، أو تسجيلهم كطلاب جدد بدون كارت عبر نموذج الصفحة.</div>
+        <div class="bulk-walkin-panel" data-walkin-panel ${walkInPreviewOpen ? '' : 'hidden'}>
+          <div class="bulk-warn">سيتم إنشاء طلاب جدد وتسجيل التحصيل في حصة المدرسة عبر نموذج الصفحة. هذه التسجيلات <strong>لا يمكن التراجع عنها</strong>، وستُستبعد من دفعة الحضور الحالية. المبلغ الافتراضي 45 ويمكن تعديله لكل طالب.</div>
+          <div class="bulk-walkin-rows">
+            ${undecided.map((row) => `<div class="bulk-walkin-row">
+              <span title="${escapeBulk(row.raw)}">${escapeBulk(row.query || row.raw)}</span>
+              <input type="number" class="bulk-input" inputmode="decimal" min="0" max="999999.99" step="0.01"
+                data-walkin-amount-key="${escapeBulk(row.key)}" value="${formatWalkInAmount(walkInAmountFor(row))}"
+                aria-label="المبلغ المدفوع لـ ${escapeBulk(row.query || row.raw)}" />
+            </div>`).join('')}
+          </div>
+          <div class="bulk-resolve-actions">
+            <button type="button" class="bulk-mini-btn" data-walkin-confirm>تسجيل الطلاب والتحصيل</button>
+            <button type="button" class="bulk-mini-btn" data-walkin-cancel>إلغاء</button>
+          </div>
+        </div>
         ${undecided.map(renderNameRow).join('')}
       </div>`
     }
@@ -1212,6 +1393,7 @@ export function mountShell(): void {
     const exec = executableEntries()
     const unresolved = unresolvedNameRows()
     const dropped = bulkNameRows.filter((r) => r.status === 'dropped').length
+    const walkInCount = bulkNameRows.filter((r) => r.status === 'walk-in').length
     const resolvedNames = bulkNameRows.filter((r) => r.status === 'resolved').length
 
     const parts: string[] = []
@@ -1223,6 +1405,7 @@ export function mountShell(): void {
       <div><strong>أسماء (تم التعرف)</strong><span>${resolvedNames}/${bulkParsed.names.length}</span></div>
       <div><strong>تحتاج قرارًا</strong><span>${unresolved.length}</span></div>
       <div><strong>تم تجاهلها</strong><span>${dropped}</span></div>
+      <div><strong>سُجّلت كطلاب جدد</strong><span>${walkInCount}</span></div>
       <div><strong>جاهزة للإرسال</strong><span>${exec.length}</span></div>
       <div><strong>مكررة</strong><span>${bulkParsed.duplicates.length + duplicateEntryCount()}</span></div>
       <div><strong>نوع الحصة</strong><span>${bulkPayMode === 'school' ? 'مدرسة' : 'سنتر'}</span></div>
