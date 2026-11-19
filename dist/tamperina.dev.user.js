@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tamperina (DEV)
 // @namespace    https://github.com/Omar-Khaled-57/Tamperina
-// @version      0.0.10
+// @version      0.0.11
 // @author       Omar Khaled
 // @description  DEV build of Tamperina — live attendance + evaluation pages
 // @match        https://mrahmedzakaria.online/attendance/scan

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tamperina
 // @namespace    https://github.com/Omar-Khaled-57/Tamperina
-// @version      0.0.10
+// @version      0.0.11
 // @author       Omar Khaled
 // @description  Pixel mascot launcher and growing toolkit for the Ahmed Zakaria platform
 // @supportURL   https://github.com/Omar-Khaled-57/Tamperina/issues
