@@ -334,6 +334,8 @@ export function mountShell(): void {
   `
   shadow.appendChild(backdrop)
 
+  const findBar = mountFindBar(shadow)
+
   const launcher = shellEl.querySelector<HTMLElement>('.launcher')!
   const flip = shellEl.querySelector<HTMLElement>('.flip')!
   const spin = shellEl.querySelector<HTMLElement>('.spin')!
@@ -365,7 +367,61 @@ export function mountShell(): void {
       controller.canUndo,
       controller.canRedo,
       controller.history.map((action) => `${action.id}:${action.title}`).join('|'),
+      evaluationFeatureStateSignature(),
+      isEvaluationPage(),
     ].join('~')
+  }
+
+  function evaluationTogglesHtml(): string {
+    const onPage = isEvaluationPage()
+    const cards = [
+      {
+        id: 'student-select' as const,
+        icon: icons.userCheck,
+        title: 'اختيار الطالب والاختصارات',
+        desc: 'انقر على صف الطالب لاختياره، ثم حدد التقدير بحرف أو اكتب درجة الامتحان بالأرقام والنقطة. الحروف تعمل باللوحتين العربية والإنجليزية.',
+        note: '؟ / h → امتياز · ج / [ → جيد جدا · ح / p → جيد · م / l → مقبول · ض / q → ضعيف · ن / k → الواجب ناقص',
+      },
+      {
+        id: 'evaluation-find' as const,
+        icon: icons.search,
+        title: 'شريط البحث في التقييم',
+        desc: 'Ctrl+Alt+F يفتح شريط بحث في أسفل الصفحة يبحث في كل صفوف الطلاب. كتابة رقم مكوّن من ٤ خانات تحدد الطالب تلقائيًا.',
+        note: 'Enter / Shift+Enter للتنقل بين النتائج، وEsc للإغلاق.',
+      },
+      {
+        id: 'homework-buttons' as const,
+        icon: icons.graduationCap,
+        title: 'أزرار تقييم الواجب',
+        desc: 'أزرار ملوّنة متوهجة بدل قائمة الواجب. الضغط على الزر يختار الطالب ويحدّث التقدير، وقراءة النتيجة تتم عبر نموذج الصفحة نفسه.',
+        note: 'تعمل معها نفس اختصارات التقدير عند اختيار طالب.',
+      },
+    ]
+
+    return cards.map((card) => {
+      const enabled = isFeatureEnabled(card.id)
+      const badge = !onPage
+        ? { text: 'غير متاح', className: 'off' }
+        : enabled
+          ? { text: 'مفعّل', className: 'on' }
+          : { text: 'متوقف', className: 'off' }
+      return `
+        <section class="feature-card">
+          <header class="feature-head">
+            <span class="feature-icon">${card.icon}</span>
+            <span class="feature-titles">
+              <strong>${card.title}</strong>
+              <small>${onPage ? 'تقييم الحصة' : 'تقييم الحصة فقط'}</small>
+            </span>
+            <span class="feature-badge ${badge.className}">${badge.text}</span>
+            <button type="button" class="switch" data-feature-id="${card.id}" role="switch"
+              aria-checked="${enabled}" aria-label="تشغيل أو إيقاف ${card.title}" ${onPage ? '' : 'disabled'}><span></span></button>
+          </header>
+          <p class="feature-desc">${card.desc}</p>
+          <p class="feature-note">${icons.keyboard} ${card.note}</p>
+        </section>
+      `
+    }).join('')
   }
 
   function renderFeature(controller: UndoRedoController): void {
@@ -396,6 +452,7 @@ export function mountShell(): void {
     if (!controller.supported) {
       featureList.innerHTML = `
         ${generalTogglesHtml}
+        ${evaluationTogglesHtml()}
         <section class="feature-card">
           <header class="feature-head">
             <span class="feature-icon">${icons.undo}</span>
@@ -436,6 +493,7 @@ export function mountShell(): void {
 
     featureList.innerHTML = `
       ${generalTogglesHtml}
+      ${evaluationTogglesHtml()}
       <section class="feature-card">
         <header class="feature-head">
           <span class="feature-icon">${icons.undo}</span>
@@ -699,7 +757,11 @@ export function mountShell(): void {
     } else if (btn.hasAttribute('data-redo')) {
       void undoRedo.redo()
     } else if (btn.hasAttribute('data-feature-id')) {
-      const featureId = btn.dataset.featureId
+      const featureId = btn.dataset.featureId ?? ''
+      if (isEvaluationFeatureId(featureId)) {
+        setFeatureEnabled(featureId, !isFeatureEnabled(featureId))
+        return
+      }
       const storageKey = featureId === 'center-modal'
         ? 'tamperina_center_modal'
         : featureId === 'hide-barcode'
@@ -717,7 +779,22 @@ export function mountShell(): void {
     }
   })
 
+  subscribeFeatures(() => {
+    renderFeatureIfNeeded()
+    if (!isFeatureEnabled('student-select')) selectRow(null, { silent: true })
+    if (!isFeatureEnabled('evaluation-find')) findBar.toggle(false)
+  })
+
   document.addEventListener('keydown', (event) => {
+    // Evaluation find bar: Ctrl+Alt+F (plain Ctrl+F stays with the browser).
+    if (event.ctrlKey && event.altKey && !event.metaKey && event.code === 'KeyF' && isEvaluationPage()) {
+      if (isFeatureEnabled('evaluation-find')) {
+        event.preventDefault()
+        findBar.toggle()
+      }
+      return
+    }
+
     if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.altKey) {
       const redoShortcut = event.code === 'KeyY' || (event.code === 'KeyZ' && event.shiftKey)
       const undoShortcut = event.code === 'KeyZ' && !event.shiftKey
@@ -732,10 +809,35 @@ export function mountShell(): void {
       }
     }
 
+    if (event.key === 'Escape' && findBar.isOpen()) {
+      event.preventDefault()
+      findBar.toggle(false)
+      return
+    }
     if (event.key === 'Escape' && isModalOpen()) {
       closeModal()
       return
     }
+    if (event.key === 'Escape' && isEvaluationPage() && getSelectedRow()) {
+      event.preventDefault()
+      commitExamTyping()
+      selectRow(null, { silent: true })
+      return
+    }
+
+    if (isEvaluationPage()
+      && isFeatureEnabled('student-select')
+      && !event.ctrlKey && !event.metaKey && !event.altKey
+      && !findBar.isOpen()
+      && !isEditableTarget(event.target)
+      && !(event.target as Element | null)?.closest?.('button, a, [role="button"]')) {
+      const selected = getSelectedRow()
+      if (selected && handleSelectedRowKey(event, selected)) {
+        event.preventDefault()
+        return
+      }
+    }
+
     if (event.altKey && event.shiftKey && event.code === 'KeyT') {
       event.preventDefault()
       if (state.clickThrough) {
@@ -797,50 +899,45 @@ export function mountShell(): void {
     }
   }
 
-  /** Seed/keep payment overrides for known entries (school mode). */
+  /** Seed overrides only from explicit payment info; absent info keeps the platform default. */
   function seedPaymentOverridesFromParsed(): void {
     if (!bulkParsed) return
     // Seed from direct codes
     for (const item of bulkParsed.codes) {
       const code = item.code.toUpperCase()
-      if (item.payment && !bulkPayOverrides.has(code)) {
-        bulkPayOverrides.set(code, {
-          studentCode: code,
-          status: item.payment.status,
-          amountPaid: item.payment.amountPaid,
-        })
-      } else if (!bulkPayOverrides.has(code)) {
-        bulkPayOverrides.set(code, { studentCode: code, status: 'paid' })
-      }
+      if (!item.payment || bulkPayOverrides.has(code)) continue
+      bulkPayOverrides.set(code, {
+        studentCode: code,
+        status: item.payment.status,
+        amountPaid: item.payment.amountPaid,
+      })
     }
     // Seed from resolved names
     for (const row of bulkNameRows) {
-      if (row.status !== 'resolved' || !row.code) continue
+      if (row.status !== 'resolved' || !row.code || !row.payment) continue
       const code = row.code.toUpperCase()
-      if (row.payment && !bulkPayOverrides.has(code)) {
-        bulkPayOverrides.set(code, {
-          studentCode: code,
-          status: row.payment.status,
-          amountPaid: row.payment.amountPaid,
-        })
-      } else if (!bulkPayOverrides.has(code)) {
-        bulkPayOverrides.set(code, { studentCode: code, status: 'paid' })
-      }
+      if (bulkPayOverrides.has(code)) continue
+      bulkPayOverrides.set(code, {
+        studentCode: code,
+        status: row.payment.status,
+        amountPaid: row.payment.amountPaid,
+      })
     }
   }
 
   function renderInlinePaymentControls(code: string): string {
     if (bulkPayMode !== 'school') return ''
     const key = code.toUpperCase()
-    const override = bulkPayOverrides.get(key) ?? { studentCode: key, status: 'paid' as PaymentStatus }
-    const status = override.status
-    const amount = override.amountPaid
+    const override = bulkPayOverrides.get(key)
+    const status = override?.status ?? 'default'
+    const amount = override?.amountPaid
     const needsAmount = status === 'partial' || status === 'discounted'
     const selectOpts = ([
+      ['default', 'افتراضي الحصة'],
       ['paid', 'كامل'],
       ['partial', 'جزئي'],
       ['discounted', 'مخفض/مجاني'],
-      ['forgotten', 'نسي الفلوس'],
+      ['forgotten', 'نسي/مؤجل'],
     ] as const).map(([val, lbl]) =>
       `<option value="${val}" ${status === val ? 'selected' : ''}>${lbl}</option>`
     ).join('')
@@ -907,7 +1004,7 @@ export function mountShell(): void {
     if (reason) setBulkBadge(reason, 'off')
   }
 
-  function executableEntries(): Array<{ code: string, label?: string }> {
+  function allExecutableEntries(): Array<{ code: string, label?: string }> {
     if (!bulkParsed) return []
     const result: Array<{ code: string, label?: string }> = []
     for (const item of bulkParsed.codes) result.push({ code: item.code, label: item.raw })
@@ -918,6 +1015,21 @@ export function mountShell(): void {
       }
     }
     return result
+  }
+
+  /** Same student can appear as a code and as a resolved name — submit them once. */
+  function executableEntries(): Array<{ code: string, label?: string }> {
+    const seen = new Set<string>()
+    return allExecutableEntries().filter((entry) => {
+      const code = entry.code.toUpperCase()
+      if (seen.has(code)) return false
+      seen.add(code)
+      return true
+    })
+  }
+
+  function duplicateEntryCount(): number {
+    return allExecutableEntries().length - executableEntries().length
   }
 
   function unresolvedNameRows(): NameRow[] {
@@ -1112,7 +1224,8 @@ export function mountShell(): void {
       <div><strong>تحتاج قرارًا</strong><span>${unresolved.length}</span></div>
       <div><strong>تم تجاهلها</strong><span>${dropped}</span></div>
       <div><strong>جاهزة للإرسال</strong><span>${exec.length}</span></div>
-      <div><strong>مكررة</strong><span>${bulkParsed.duplicates.length}</span></div>
+      <div><strong>مكررة</strong><span>${bulkParsed.duplicates.length + duplicateEntryCount()}</span></div>
+      <div><strong>نوع الحصة</strong><span>${bulkPayMode === 'school' ? 'مدرسة' : 'سنتر'}</span></div>
       <div><strong>غير صالحة</strong><span>${bulkParsed.invalid.length}</span></div>
     </div>`)
 
@@ -1137,7 +1250,12 @@ export function mountShell(): void {
     if (!exec.length && !bulkResolving) {
       parts.push(`<div class="bulk-warn">لا توجد عناصر جاهزة للإرسال.</div>`)
     }
-    parts.push(`<div class="bulk-note-inline">يتم مطابقة الأسماء ضمن طلاب الحصة المفتوحة. بدون بيان دفع قد يُسجَّل الحضور كدفع مؤجل إذا كانت الحصة بتحصيل (سلوك المنصة).</div>`)
+    if (duplicateEntryCount()) {
+      parts.push(`<div class="bulk-note-inline">تم توحيد ${duplicateEntryCount()} طالب ظهر أكثر من مرة (كود + اسم مثلًا) — سيُرسل مرة واحدة.</div>`)
+    }
+    parts.push(bulkPayMode === 'school'
+      ? `<div class="bulk-note-inline">وضع المدرسة: يُرسل الدفع فقط لمن له بيان دفع صريح. بدون بيان يُترك الحضور على إعداد الحصة الافتراضي في المنصة. الصيغ: كود/اسم [، مبلغ] [، الحالة].</div>`
+      : `<div class="bulk-note-inline">وضع السنتر: يُستخدم نموذج المسح كما هو، وأي بيانات دفع في النص تُتجاهل. الأسماء تُطابق ضمن طلاب الحصة المفتوحة.</div>`)
 
     bulkPreviewBox.innerHTML = parts.join('')
   }
@@ -1270,9 +1388,15 @@ export function mountShell(): void {
       return
     }
 
+    const entries = executableEntries()
+    if (!entries.length) return
+
     if (bulkPayMode === 'school') {
+      const sendingCodes = new Set(entries.map((entry) => entry.code.toUpperCase()))
       const missingAmount = Array.from(bulkPayOverrides.values()).find(
-        (o) => (o.status === 'partial' || o.status === 'discounted') && (o.amountPaid == null || Number.isNaN(o.amountPaid)),
+        (o) => sendingCodes.has(o.studentCode.toUpperCase())
+          && (o.status === 'partial' || o.status === 'discounted')
+          && (o.amountPaid == null || Number.isNaN(o.amountPaid)),
       )
       if (missingAmount) {
         toast({
@@ -1284,8 +1408,6 @@ export function mountShell(): void {
       }
     }
 
-    const entries = executableEntries()
-    if (!entries.length) return
     if (!undoRedo.enabled) {
       toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء والتراجع معطل.', variant: 'warning' })
       return
@@ -1397,9 +1519,19 @@ export function mountShell(): void {
 
   function updateBulkInputPlaceholder(): void {
     if (bulkPayMode === 'school') {
-      bulkCodesInput.placeholder = '2017, 45, كامل\n2016, 10, مخفض\nأحمد محمد, 0, نسي الفلوس'
+      bulkCodesInput.placeholder = [
+        'كود أو اسم [، مبلغ] [، حالة] (, أو ،) — مبلغ بلا حالة = جزئي، بدونه = افتراضي الحصة',
+        'الحالات: كامل | جزئي | مخفض/مجاني | نسي/مؤجل',
+        '2017, 45, كامل',
+        '2016, 10, مخفض',
+        '2015, مخفض, 10',
+        'أحمد محمد, 0, نسي',
+        '2018, 30',
+        '2019',
+        'أحمد محمد',
+      ].join('\n')
     } else {
-      bulkCodesInput.placeholder = '2349\nأحمد محمد\n2351'
+      bulkCodesInput.placeholder = 'كود أو اسم في كل سطر (الدفع يُتجاهل هنا):\n2349\nأحمد محمد\n2351'
     }
   }
 
@@ -1427,18 +1559,21 @@ export function mountShell(): void {
     const statusEl = target.closest<HTMLSelectElement>('[data-inline-pay-status]')
     if (statusEl) {
       const code = statusEl.dataset.inlinePayStatus!.toUpperCase()
-      const newStatus = statusEl.value as PaymentStatus
-      const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'paid' }
-      existing.status = newStatus
-      if (newStatus !== 'partial' && newStatus !== 'discounted') {
-        delete existing.amountPaid
+      const newStatus = statusEl.value
+      const needsAmount = newStatus === 'partial' || newStatus === 'discounted'
+      if (newStatus === 'default') {
+        bulkPayOverrides.delete(code)
+      } else {
+        const existing = bulkPayOverrides.get(code) ?? { studentCode: code, status: 'paid' as PaymentStatus }
+        existing.status = newStatus as PaymentStatus
+        if (!needsAmount) delete existing.amountPaid
+        bulkPayOverrides.set(code, existing)
       }
-      bulkPayOverrides.set(code, existing)
       const wrap = bulkResolveBox.querySelector<HTMLElement>(`[data-inline-pay-amount-wrap="${CSS.escape(code)}"]`)
       const amountInput = bulkResolveBox.querySelector<HTMLInputElement>(`[data-inline-pay-amount="${CSS.escape(code)}"]`)
-      if (wrap) wrap.hidden = !(newStatus === 'partial' || newStatus === 'discounted')
-      if (amountInput && !(newStatus === 'partial' || newStatus === 'discounted')) amountInput.value = ''
-      if (amountInput && (newStatus === 'partial' || newStatus === 'discounted')) amountInput.focus()
+      if (wrap) wrap.hidden = !needsAmount
+      if (amountInput && !needsAmount) amountInput.value = ''
+      if (amountInput && needsAmount) amountInput.focus()
       bulkArmed = false
       updateBulkButtons()
       return
@@ -1620,6 +1755,10 @@ export function mountShell(): void {
     })
   })
   GM_registerMenuCommand('Tamperina — فتح الإعدادات', () => openModal())
+  GM_registerMenuCommand('Tamperina — بحث التقييم (Ctrl+Alt+F)', () => {
+    if (!isEvaluationPage() || !isFeatureEnabled('evaluation-find')) return
+    findBar.toggle()
+  })
   GM_registerMenuCommand('Tamperina — إلغاء النقر من خلال', () => {
     state.clickThrough = false
     persist()

@@ -17,6 +17,12 @@ import building2 from 'lucide-static/icons/building-2.svg?raw'
 import school from 'lucide-static/icons/school.svg?raw'
 import wallet from 'lucide-static/icons/wallet.svg?raw'
 import barcode from 'lucide-static/icons/barcode.svg?raw'
+import search from 'lucide-static/icons/search.svg?raw'
+import chevronUp from 'lucide-static/icons/chevron-up.svg?raw'
+import chevronDown from 'lucide-static/icons/chevron-down.svg?raw'
+import userCheck from 'lucide-static/icons/user-check.svg?raw'
+import graduationCap from 'lucide-static/icons/graduation-cap.svg?raw'
+import keyboard from 'lucide-static/icons/keyboard.svg?raw'
 
 export const icons = {
   flip: flipHorizontal,
@@ -39,4 +45,10 @@ export const icons = {
   school,
   payment: wallet,
   barcode: barcode,
+  search,
+  chevronUp,
+  chevronDown,
+  userCheck,
+  graduationCap,
+  keyboard,
 } as const

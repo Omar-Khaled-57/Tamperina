@@ -56,6 +56,8 @@ export interface HistoryAction {
   at: number
   undo: () => Promise<HistoryAction>
   redo: () => Promise<HistoryAction>
+  /** Set when a batch finished but some of its items could not be reversed. */
+  warning?: string
 }
 
 export interface UndoRedoDebugObservation {
@@ -794,25 +796,37 @@ function createController(): UndoRedoController {
     detail: string,
     actions: HistoryAction[],
   ): HistoryAction {
+    const run = async (direction: 'undo' | 'redo'): Promise<HistoryAction> => {
+      const next: HistoryAction[] = new Array(actions.length)
+      const failures: string[] = []
+      const indices = actions.map((_, index) => index)
+      if (direction === 'undo') indices.reverse()
+
+      for (const i of indices) {
+        try {
+          next[i] = await actions[i][direction]()
+        } catch (error) {
+          // Keep the original action so a later attempt can still target it;
+          // one missing record must not abort the rest of the batch.
+          next[i] = actions[i]
+          failures.push(error instanceof Error ? error.message : String(error))
+        }
+      }
+
+      const grouped = makeBatchAction(title, detail, next)
+      if (failures.length) {
+        grouped.warning = `اكتمل ${actions.length - failures.length} من ${actions.length} — تعذّر: ${failures.slice(0, 3).join('، ')}`
+      }
+      return grouped
+    }
+
     return {
       id: nextId(),
       title,
       detail,
       at: Date.now(),
-      undo: async () => {
-        const next: HistoryAction[] = new Array(actions.length)
-        for (let i = actions.length - 1; i >= 0; i--) {
-          next[i] = await actions[i].undo()
-        }
-        return makeBatchAction(title, detail, next)
-      },
-      redo: async () => {
-        const next: HistoryAction[] = new Array(actions.length)
-        for (let i = 0; i < actions.length; i++) {
-          next[i] = await actions[i].redo()
-        }
-        return makeBatchAction(title, detail, next)
-      },
+      undo: () => run('undo'),
+      redo: () => run('redo'),
     }
   }
 
@@ -1055,6 +1069,9 @@ function createController(): UndoRedoController {
         description: `أُلغي: ${action.title}`,
         variant: 'undo',
       })
+      if (inverse.warning) {
+        toast({ title: 'تراجع جزئي', description: inverse.warning, variant: 'warning', duration: 8000 })
+      }
     } catch (error) {
       toast({
         title: 'تعذّر التراجع',
@@ -1087,6 +1104,9 @@ function createController(): UndoRedoController {
         description: `أُعيد: ${action.title}`,
         variant: 'redo',
       })
+      if (forward.warning) {
+        toast({ title: 'إعادة جزئية', description: forward.warning, variant: 'warning', duration: 8000 })
+      }
     } catch (error) {
       toast({
         title: 'تعذّرت الإعادة',

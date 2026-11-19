@@ -1,6 +1,14 @@
+import { unsafeWindow } from '$'
 import { getUndoRedoController } from './undoRedo'
 
 const CODE_RE = /^[A-Z0-9_-]{3,80}$/
+
+/** Calls the page's fetch so the shared undo/redo observer sees our writes. */
+function pageFetch(): typeof fetch {
+  const scope = (unsafeWindow ?? window) as Window
+  const fetchFn = (scope.fetch ?? window.fetch) as typeof fetch
+  return fetchFn.bind(scope)
+}
 
 export type PaymentMode = 'center' | 'school'
 export type PaymentStatus = 'paid' | 'partial' | 'discounted' | 'forgotten'
@@ -170,10 +178,11 @@ function isArabicOrNameLike(value: string): boolean {
 function normalizeStatusToken(value: string): PaymentStatus | null {
   const v = value.trim().toLowerCase()
   if (!v) return null
-  if (v === 'كامل' || v === 'paid' || v === 'full') return 'paid'
+  if (v === 'كامل' || v === 'paid' || v === 'full' || v === 'مدفوع') return 'paid'
   if (v === 'جزئي' || v === 'partial') return 'partial'
   if (v === 'مخفض' || v === 'مخفض/مجاني' || v === 'مجاني' || v === 'discounted' || v === 'free') return 'discounted'
-  if (v === 'نسي' || v === 'نسي الفلوس' || v === 'forgot' || v === 'forgotten') return 'forgotten'
+  if (v === 'نسي' || v === 'نسي الفلوس' || v === 'مؤجل' || v === 'دفع مؤجل'
+    || v === 'متأخر' || v === 'forgot' || v === 'forgotten' || v === 'deferred') return 'forgotten'
   return null
 }
 
@@ -181,32 +190,45 @@ function parseAmountToken(value: string): number | undefined {
   const cleaned = value.trim().replace(/[^\d.,-]/g, '').replace(',', '.')
   if (!cleaned) return undefined
   const num = Number(cleaned)
-  return Number.isFinite(num) ? num : undefined
+  return Number.isFinite(num) && num >= 0 ? num : undefined
 }
 
+/**
+ * Accepts both `identifier, amount, status` and `identifier, status, amount`.
+ * A bare second number means partial payment; a bare status leaves the amount
+ * unset so the platform default is used where applicable.
+ */
 function parseInlinePayment(segments: string[]): { identifier: string, payment?: ParsedEntryPayment } | null {
   if (segments.length < 2) return null
-  const last = normalizeStatusToken(segments[segments.length - 1])
-  if (last) {
+  const lastIndex = segments.length - 1
+  const lastStatus = normalizeStatusToken(segments[lastIndex])
+  const beforeLastStatus = lastIndex >= 1 ? normalizeStatusToken(segments[lastIndex - 1]) : null
+  const lastAmount = parseAmountToken(segments[lastIndex])
+  const beforeLastAmount = lastIndex >= 1 ? parseAmountToken(segments[lastIndex - 1]) : undefined
+
+  if (lastStatus) {
     if (segments.length === 2) {
-      return { identifier: segments[0], payment: { status: last } }
+      return { identifier: segments[0], payment: { status: lastStatus } }
     }
-    if (segments.length >= 3) {
-      const amount = parseAmountToken(segments[segments.length - 2])
-      const identifier = segments.slice(0, segments.length - 2).join(',').trim()
-      if (!identifier) return null
-      return {
-        identifier,
-        payment: amount == null ? { status: last } : { status: last, amountPaid: amount },
-      }
+    const identifier = segments.slice(0, lastIndex - 1).join(',').trim()
+    if (!identifier) return null
+    return {
+      identifier,
+      payment: beforeLastAmount == null
+        ? { status: lastStatus }
+        : { status: lastStatus, amountPaid: beforeLastAmount },
     }
   }
+
+  if (beforeLastStatus && lastAmount != null) {
+    const identifier = segments.slice(0, lastIndex - 1).join(',').trim()
+    if (!identifier) return null
+    return { identifier, payment: { status: beforeLastStatus, amountPaid: lastAmount } }
+  }
+
   // identifier, amount (no explicit status) -> treat as partial with amount
-  if (segments.length === 2) {
-    const amount = parseAmountToken(segments[1])
-    if (amount != null && segments[0].trim()) {
-      return { identifier: segments[0], payment: { status: 'partial', amountPaid: amount } }
-    }
+  if (segments.length === 2 && lastAmount != null && segments[0].trim()) {
+    return { identifier: segments[0], payment: { status: 'partial', amountPaid: lastAmount } }
   }
   return null
 }
@@ -234,16 +256,14 @@ export function parseBulkEntries(text: string): ParseEntriesResult {
       return
     }
     seenCodes.add(code)
-    const finalPayment = payment ?? { status: 'paid' as PaymentStatus, amountPaid: 45 }
-    codes.push({ kind: 'code', key: `c-${++seq}-${code}`, raw: raw.trim() || code, code, payment: finalPayment })
+    codes.push({ kind: 'code', key: `c-${++seq}-${code}`, raw: raw.trim() || code, code, payment })
   }
 
   const pushName = (raw: string, queryOverride?: string, payment?: ParsedEntryPayment): void => {
     const query = (queryOverride ?? raw).trim().replace(/\s+/g, ' ')
     if (!query) return
     totalTokens++
-    const finalPayment = payment ?? { status: 'paid' as PaymentStatus, amountPaid: 45 }
-    names.push({ kind: 'name', key: `n-${++seq}-${query}`, raw: raw.trim() || query, query, payment: finalPayment })
+    names.push({ kind: 'name', key: `n-${++seq}-${query}`, raw: raw.trim() || query, query, payment })
   }
 
   const pushEntry = (identifier: string, displayRaw: string, payment?: ParsedEntryPayment): void => {
@@ -312,7 +332,7 @@ export async function searchStudents(
     url.searchParams.set('q', query)
     url.searchParams.set('limit', '100')
 
-    const response = await fetch(url.href, {
+    const response = await pageFetch()(url.href, {
       credentials: 'same-origin',
       headers: { Accept: 'application/json' },
     })
@@ -426,30 +446,40 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function waitForCode(
-  code: string,
-  timeoutMs: number,
-): Promise<import('./undoRedo').AttendanceEvent | 'timeout'> {
-  const undoRedo = getUndoRedoController()
-  return new Promise((resolve) => {
-    let done = false
-    const timer = window.setTimeout(() => {
-      if (done) return
-      done = true
-      off()
-      resolve('timeout')
-    }, timeoutMs)
+interface CodeWait {
+  promise: Promise<import('./undoRedo').AttendanceEvent | 'timeout'>
+  cancel(): void
+}
 
-    const off = undoRedo.onAttendance((event) => {
-      if (done) return
-      const recordCode = String(event.record.studentCode ?? event.record.username ?? '').toUpperCase()
-      if (recordCode && recordCode !== code.toUpperCase()) return
-      done = true
-      window.clearTimeout(timer)
-      off()
-      resolve(event)
-    })
+function waitForCode(code: string, timeoutMs: number): CodeWait {
+  const undoRedo = getUndoRedoController()
+  let done = false
+  let resolveWait: (value: import('./undoRedo').AttendanceEvent | 'timeout') => void = () => {}
+  let off: () => void = () => {}
+
+  const promise = new Promise<import('./undoRedo').AttendanceEvent | 'timeout'>((resolve) => {
+    resolveWait = resolve
   })
+  const cleanup = (): void => {
+    if (done) return
+    done = true
+    window.clearTimeout(timer)
+    off()
+  }
+  const timer = window.setTimeout(() => {
+    cleanup()
+    resolveWait('timeout')
+  }, timeoutMs)
+
+  off = undoRedo.onAttendance((event) => {
+    if (done) return
+    const recordCode = String(event.record.studentCode ?? event.record.username ?? '').toUpperCase()
+    if (recordCode && recordCode !== code.toUpperCase()) return
+    cleanup()
+    resolveWait(event)
+  })
+
+  return { promise, cancel: cleanup }
 }
 
 function submitScanForm(form: HTMLFormElement, input: HTMLInputElement): void {
@@ -477,32 +507,37 @@ function getCsrfToken(): string {
 }
 
 /**
- * School-mode: POST directly to /attendance with payment body for each student.
- * This bypasses the scan form + payment dialog entirely, which is what we want
- * when we've already collected payment info in the bulk UI.
+ * School-mode: POST directly to /attendance, using the platform's own default
+ * when no payment override was provided. Payment fields are only sent when the
+ * user explicitly chose a status, so a deferred-payment lesson is not silently
+ * converted into full payments.
+ *
+ * The request goes through the page's patched fetch so the shared undo/redo
+ * observer records it and the batch stays reversible.
  */
 async function submitSchoolAttendance(
   code: string,
   lessonId: string,
   override: PaymentOverride | undefined,
-): Promise<{ ok: true, data: Record<string, unknown> } | { ok: false, message: string }> {
+): Promise<{ ok: true, data: Record<string, unknown> } | { ok: false, message: string, status?: number }> {
   const csrf = getCsrfToken()
   if (!csrf) return { ok: false, message: 'تعذّر قراءة CSRF token من الصفحة.' }
 
-  const status = override?.status ?? 'paid'
   const body: Record<string, unknown> = {
     student: code,
     lesson_id: Number(lessonId),
     source: 'manual',
-    payment_status: status,
   }
-  if ((status === 'partial' || status === 'discounted') && override?.amountPaid != null) {
-    body.amount_paid = override.amountPaid
+  if (override?.status) {
+    body.payment_status = override.status
+    if ((override.status === 'partial' || override.status === 'discounted') && override.amountPaid != null) {
+      body.amount_paid = override.amountPaid
+    }
+    if (override.note) body.payment_note = override.note
   }
-  if (override?.note) body.payment_note = override.note
 
   try {
-    const response = await fetch('/attendance', {
+    const response = await pageFetch()('/attendance', {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
@@ -516,7 +551,7 @@ async function submitSchoolAttendance(
     if (!response.ok) {
       const errors = data.errors as Record<string, string[]> | undefined
       const msg = String(data.message ?? (errors ? Object.values(errors).flat()[0] : '') ?? 'خطأ غير معروف')
-      return { ok: false, message: msg }
+      return { ok: false, message: msg, status: response.status }
     }
     return { ok: true, data }
   } catch (err) {
@@ -565,6 +600,7 @@ export async function runBulkAttendance(options: {
 
     const known = new Set(undoRedo.knownRecordCodes.map((c) => c.toUpperCase()))
     const toRun: Array<{ code: string, label?: string }> = []
+    const queued = new Set<string>()
     for (const entry of options.entries) {
       const code = entry.code.toUpperCase()
       if (options.signal.stop) {
@@ -575,8 +611,16 @@ export async function runBulkAttendance(options: {
         recordRow({ code, label: entry.label, status: 'skipped-known', message: 'مسجّل بالفعل', at: Date.now() })
         continue
       }
+      if (queued.has(code)) {
+        recordRow({ code, label: entry.label, status: 'duplicate', message: 'مكرر في القائمة — لم يُرسل مرتين', at: Date.now() })
+        continue
+      }
+      queued.add(code)
       toRun.push({ code, label: entry.label })
     }
+
+    const duplicateMessage = (message: string): boolean =>
+      /مسجّ?ل|سبق|موجود|مكرر|duplicate|already/i.test(message)
 
     const concurrency = 10
     let index = 0
@@ -595,29 +639,51 @@ export async function runBulkAttendance(options: {
         const wait = waitForCode(code, timeoutMs)
         const result = await submitSchoolAttendance(code, lessonId, override)
         if (!result.ok) {
-          recordRow({ code, label: entry.label, status: 'error', message: result.message, at: Date.now() })
-          if (!result.message.includes('مسجّل') && !result.message.includes('سبق')) {
+          wait.cancel()
+          const duplicate = duplicateMessage(result.message)
+          recordRow({
+            code,
+            label: entry.label,
+            status: duplicate ? 'duplicate' : 'error',
+            message: result.message,
+            at: Date.now(),
+          })
+          if (!duplicate) {
             options.signal.stop = true
             stopped = true
           }
           continue
         }
-        // Race observer confirmation with a short cap so a slow/missed event doesn't stall the batch.
+        // Confirmation must come from the shared observer: a record we cannot
+        // undo must never be reported as part of the reversible batch.
         const event = await Promise.race([
-          wait,
-          sleep(2000).then(() => 'timeout' as const),
+          wait.promise,
+          sleep(Math.min(timeoutMs, 4000)).then(() => 'timeout' as const),
         ])
+        wait.cancel()
         if (event === 'timeout') {
-          recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', at: Date.now() })
+          const id = result.data.id ?? result.data.record_id
+          recordRow({
+            code,
+            label: entry.label,
+            status: 'error',
+            message: `تم الإرسال لكن لم يصل تأكيد المراقب — راجع السجل يدويًا${id == null ? '' : ` (#${id})`}`,
+            recordId: id == null ? undefined : String(id),
+            at: Date.now(),
+          })
+          options.signal.stop = true
+          stopped = true
         } else if (event.type === 'add') {
           const payLabel = override ? {
-            paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي الفلوس',
-          }[override.status] : 'كامل'
+            paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي/مؤجل',
+          }[override.status] : 'افتراضي الحصة'
           recordRow({ code, label: entry.label, status: 'created', message: `تم التسجيل — ${payLabel}`, recordId: event.record.id, at: Date.now() })
         } else if (event.type === 'duplicate') {
           recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: event.record.id, at: Date.now() })
         } else {
           recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now() })
+          options.signal.stop = true
+          stopped = true
         }
       }
     }
@@ -652,7 +718,7 @@ export async function runBulkAttendance(options: {
     const wait = waitForCode(code, timeoutMs)
     submitScanForm(scan.form, scan.input)
 
-    const result = await wait
+    const result = await wait.promise
 
     if (result === 'timeout') {
       recordRow({ code, label: entry.label, status: 'timeout', message: 'لم يصل تأكيد من الخادم', at: Date.now() })

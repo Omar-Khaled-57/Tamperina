@@ -10,6 +10,8 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 **M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, evaluation placeholder, and a coming-soon slot). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. The full plan lives in `dev/PLAN.md` (gitignored).
 
+**M3 — Evaluation tools.** Three new independent switches in **المفاتيح**, active on `/evaluation`: select a student and grade them with hotkeys, a Firefox-style find bar on `Ctrl+Alt+F` (4-digit ID auto-selects a student), and glowy homework-grade buttons. All of them set the page's own controls and dispatch `change`, so the platform's auto-save and Tamperina's undo/redo keep working.
+
 ## Build
 
 ```bash
@@ -56,9 +58,31 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 | `Ctrl+Z` / `⌘+Z` | Undo the last recorded attendance, grading, or bulk-batch action |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo the last undone action |
 | Focused input on `/attendance/scan` | Undo/redo shortcuts still run Tamperina instead of the browser's text undo |
-| `Esc` / backdrop click | Close the modal |
+| `Esc` / backdrop click | Close the modal, close the find bar, or clear the selected student (in that order) |
+| `Ctrl+Alt+F` (on `/evaluation`) | Toggle the evaluation find bar; plain `Ctrl+F` stays with the browser |
 
 Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History lives only in the current page session and is intentionally cleared on reload.
+
+### Evaluation tools (`/evaluation`)
+
+The three new switches are independent and default to on. They are disabled (but remember their state) outside `/evaluation`.
+
+**اختيار الطالب والاختصارات** — click a student's row to select it, then use these keys. They work under both Arabic and English layouts:
+
+| Key(s) | Grade |
+|---|---|
+| `?` / `؟` / `h` / `H` / `ا` | امتياز |
+| `ج` / `[` / `{` | جيد جدا |
+| `ح` / `p` / `P` | جيد |
+| `م` / `l` / `L` | مقبول |
+| `ض` / `q` / `Q` | ضعيف |
+| `ن` / `k` / `K` | الواجب ناقص |
+
+Digits and `.` type into the selected student's **exam score** (`7.5` works, Arabic-Indic digits are normalized). The first digit starts a new value; Backspace deletes; Enter or a short pause commits. Hotkeys are ignored while typing in a field or in the find bar.
+
+**شريط البحث في التقييم** — `Ctrl+Alt+F` opens a Firefox-style bar at the bottom. It searches all student rows, highlights matches, and `Enter` / `Shift+Enter` move between them; `Esc` closes it. A query of exactly four digits (Latin or Arabic) selects the matching student automatically, even if the selection toggle is off.
+
+**أزرار تقييم الواجب** — replaces the detected homework dropdown with colored glowing buttons. Clicking one selects that student and updates the grade through the page's own select, so its auto-save and undo/redo still apply. With this switch on, the letter hotkeys above also set the homework grade when a student is selected.
 
 ### Bulk actions
 
@@ -74,7 +98,24 @@ On `/attendance/scan` (including `?lesson_id=...` links):
 4. Resolve any names that are **not found**, **ambiguous**, or have **too many matches**: choose the correct student, edit the name and re-search, or **تجاهل (يدويًا)** to skip and handle manually.
 5. When everything is resolved or dropped, click **تسليح التنفيذ**, then **تنفيذ**.
 
-Tamperina fills the scan input and submits one student at a time, waits for server confirmation, and logs each result. **إيقاف** stops between students. Undo/Redo must be enabled so the run is recorded as one reversible batch.
+Tamperina submits one student at a time (sequential scan-form loop in **سنتر** mode, parallel direct posts in **مدرسة** mode), waits for the shared observer's confirmation, and logs each result. **إيقاف** stops between students. Undo/Redo must be enabled so the run is recorded as one reversible batch. A post without observer confirmation is logged as an error and stops the run instead of being reported as an undoable success.
+
+#### School-mode payment input
+
+One student per line. A code or a name is enough; payment is optional and only sent when written explicitly:
+
+```text
+2017, 45, كامل
+2016, 10, مخفض
+2015, مخفض, 10
+أحمد محمد, 0, نسي
+أحمد محمد, مؤجل
+2018, 30
+2019
+أحمد محمد
+```
+
+Accepted status words: `كامل/مدفوع`, `جزئي`, `مخفض/مجاني`, `نسي/مؤجل/متأخر`. Either comma `,` or the Arabic comma `،` works; amount and status may be swapped. A bare second number means **partial** payment. With no payment field, Tamperina sends no payment data at all and the platform's own lesson default applies — it never silently marks students as fully paid. The inline **الدفع** controls in the preview can override any entry, including resetting it to **افتراضي الحصة**.
 
 Suggested prompt for transcribing handwriting (codes are safest, names are also supported):
 
