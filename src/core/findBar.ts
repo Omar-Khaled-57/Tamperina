@@ -8,6 +8,12 @@ export interface FindBar {
   destroy(): void
 }
 
+/** Keep these in sync with the fixed offsets in styles.css. */
+const FIND_BAR_BOTTOM = 12
+const TOASTS_BOTTOM = 20
+const CLEARANCE = 8
+const LIFT_DURATION_MS = 220
+
 interface HighlightRegistryLike {
   set(name: string, highlight: unknown): void
   delete(name: string): void
@@ -219,6 +225,46 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
   }
 
   let hideTimer: number | undefined
+  let openFrame: number | undefined
+  const host = shadow.host as HTMLElement
+  const shell = shadow.querySelector<HTMLElement>('.shell')
+
+  function setLift(toastLift: number, shellLift: number): void {
+    host.style.setProperty('--find-bar-lift', `${Math.max(0, Math.round(toastLift))}px`)
+    host.style.setProperty('--find-bar-shell-lift', `${Math.max(0, Math.round(shellLift))}px`)
+  }
+
+  function clearLift(): void {
+    host.style.removeProperty('--find-bar-lift')
+    host.style.removeProperty('--find-bar-shell-lift')
+  }
+
+  /** Lift the fixed UI just clear of the bar, including the mascot's real size. */
+  function measureLift(): { toast: number, shell: number } {
+    const barHeight = bar.offsetHeight
+    const toastLift = Math.max(0, FIND_BAR_BOTTOM + barHeight + CLEARANCE - TOASTS_BOTTOM)
+    const barTop = window.innerHeight - FIND_BAR_BOTTOM - barHeight
+    let shellLift = toastLift
+    if (shell) {
+      const topPercent = Number.parseFloat(shell.style.top)
+      const size = Number.parseFloat(getComputedStyle(shell).getPropertyValue('--size'))
+      if (Number.isFinite(topPercent) && Number.isFinite(size)) {
+        // `top` is the launcher's centre; the vertical translate is -50%, so
+        // the untranslated bottom edge is centre + half the sticker size.
+        const baseBottom = (window.innerHeight * topPercent) / 100 + size / 2
+        shellLift = Math.max(toastLift, Math.ceil(baseBottom - barTop + CLEARANCE))
+      }
+    }
+    return { toast: toastLift, shell: shellLift }
+  }
+
+  function refreshLift(): void {
+    if (!bar.classList.contains('is-open')) return
+    const lift = measureLift()
+    setLift(lift.toast, lift.shell)
+  }
+
+  window.addEventListener('resize', refreshLift)
 
   function setOpen(next: boolean): void {
     if (next) {
@@ -227,22 +273,30 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
         hideTimer = undefined
       }
       bar.hidden = false
-      requestAnimationFrame(() => {
+      if (openFrame) window.cancelAnimationFrame(openFrame)
+      openFrame = window.requestAnimationFrame(() => {
+        openFrame = undefined
         bar.classList.add('is-open')
+        refreshLift()
         input.focus()
         input.select()
         search()
       })
     } else {
+      if (openFrame) {
+        window.cancelAnimationFrame(openFrame)
+        openFrame = undefined
+      }
       if (bar.hidden && !bar.classList.contains('is-open')) return
       bar.classList.remove('is-open')
+      clearLift()
       clearHighlights()
       input.blur()
       if (hideTimer) window.clearTimeout(hideTimer)
       hideTimer = window.setTimeout(() => {
         bar.hidden = true
         hideTimer = undefined
-      }, 220)
+      }, LIFT_DURATION_MS)
     }
   }
 
@@ -288,6 +342,9 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
     },
     destroy() {
       if (hideTimer) window.clearTimeout(hideTimer)
+      if (openFrame) window.cancelAnimationFrame(openFrame)
+      window.removeEventListener('resize', refreshLift)
+      clearLift()
       unsubscribe()
       clearHighlights()
       highlightStyle?.remove()

@@ -153,7 +153,7 @@ The documentation set currently asks for the following files. Everything marked 
 | `work.png` | 1600×900 | Stylized product shot: the corner mascot with its hover pill, the **المفاتيح** modal open, and a hint of the **الجماعي** tab behind it. Realistic platform backdrop, but no real student data. |
 | `workflow.png` | 1600×900 | Horizontal three-step diagram — **معاينة وتحليل → تسليح التنفيذ → تنفيذ** — with a row of student codes moving through it and a final toast. Friendly, minimal, Arabic labels. |
 | `evaluation.png` | 1600×900 | `/evaluation` page with a selected student row, the find bar at the bottom showing `2/7` highlighted matches, and a small hotkey legend floating to the side. |
-| `remote.png` | 1600×900 | Two browser tabs side by side: source tab showing the remote panel with a target list, target tab running the same bulk preview; a thin bridge arrow between them. No credentials or hostnames. |
+
 
 ### Core stickers — `public/rina/*.png`
 

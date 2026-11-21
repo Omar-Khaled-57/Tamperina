@@ -26,6 +26,7 @@ This changelog was started on **2026-11-21** at version **0.0.22**. Entries befo
 
 - Documentation suite under [`docs/`](docs/README.md): documentation hub, user guide, feature reference, architecture, developer guide, API reference and troubleshooting playbook.
 - Stylized README and this changelog. No userscript behavior changed in this documentation pass.
+- The evaluation find bar now smoothly lifts toasts and the mascot launcher out of its way while open, then slides them back down when it closes (respecting reduced-motion settings).
 
 ---
 

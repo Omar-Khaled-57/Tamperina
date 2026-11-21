@@ -4,6 +4,11 @@
   font-family: Cairo, Tajawal, Tahoma, Arial, sans-serif;
   color-scheme: dark;
 
+  /* findBar.ts sets these when the evaluation find bar opens so the fixed UI
+     lifts out of its way, then clears them to slide everything back down. */
+  --find-bar-lift: 0px;
+  --find-bar-shell-lift: 0px;
+
   /* Put the whole Tamperina layer above the host page's fixed panels. Without
      this, overlay z-indexes inside the shadow root still compete directly with
      the original webapp's nav/sidebar stacking contexts. */
@@ -82,6 +87,9 @@
   /* The anchor is logical, so the centering shift must follow the host
      direction: right-anchored RTL needs +50%, left-anchored LTR needs -50%. */
   transform: translate(50%, -50%);
+  /* Individual translate keeps the RTL/LTR centering transform intact. */
+  translate: 0 calc(-1 * var(--find-bar-shell-lift, 0px));
+  transition: translate 0.22s ease;
   z-index: 2147483000;
   user-select: none;
 }
@@ -815,6 +823,8 @@
   align-items: flex-start;
   gap: 10px;
   pointer-events: none;
+  translate: 0 calc(-1 * var(--find-bar-lift, 0px));
+  transition: translate 0.22s ease;
 }
 
 .toast {
@@ -944,6 +954,8 @@
   .pill,
   .launcher,
   .mascot,
+  .shell,
+  .toasts,
   .toast,
   .backdrop,
   .modal,

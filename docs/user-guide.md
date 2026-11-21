@@ -140,7 +140,7 @@ With a row selected:
 
 ### The find bar
 
-Press `Ctrl+Alt+F` on `/evaluation` to open a Firefox-style search bar at the bottom of the page.
+Press `Ctrl+Alt+F` on `/evaluation` to open a Firefox-style search bar at the bottom of the page. While it is open, toasts and the mascot launcher glide upward so they stay visible above the bar, and settle back down when it closes.
 
 - Type a name or code to search all student rows; matches are highlighted and the bar shows `current/total`.
 - `Enter` moves to the next match; `Shift+Enter` to the previous one. The **Aa** button toggles case sensitivity.
@@ -304,7 +304,6 @@ On `/attendance/scan`:
 ## <img src="../public/rina/wave.png" width="70" align="center" /> Exam and remote tools
 
 <div align="center">
-  <img src="../public/media/remote.png" alt="A bulk run being prepared in another tab through the remote bridge" width="100%" style="border-radius: 10px; box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);" />
 </div>
 
 ### Editable exam attendance stage
