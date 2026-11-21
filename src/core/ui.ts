@@ -79,6 +79,7 @@ import {
   type PaymentMode,
   type PaymentStatus,
   type PaymentOverride,
+  type StudentCandidate,
 } from './bulkAttendance'
 import {
   parseEvaluationEntries,
@@ -1655,8 +1656,9 @@ export function mountShell(): void {
   function examStageResolvedRow(row: ExamStageRow): NameRow | undefined {
     const code = normalizeStudentCode(row.code)
     if (!code) return undefined
-    return bulkCodeRows.find((candidate) =>
-      normalizeStudentCode(candidate.code || candidate.query || candidate.raw) === code)
+    const matchesCode = (candidate: NameRow): boolean =>
+      normalizeStudentCode(candidate.code || candidate.query || candidate.raw) === code
+    return bulkCodeRows.find(matchesCode) ?? bulkNameRows.find(matchesCode)
   }
 
   function stageResolvedRow(row: ExamStageRow): NameRow {
@@ -1671,6 +1673,36 @@ export function mountShell(): void {
       candidates: [],
       message: bulkResolving ? t('ui.common.searching') : undefined,
     }
+  }
+
+  /** Resolve exam attendance entries against the students listed on this exam page. */
+  function resolveExamEntryFromPage(row: NameRow, allowUnknownCode = false): NameRow {
+    const match = matchIdentifier(row.query)
+    const candidates: StudentCandidate[] = match.candidates.filter((candidate) => candidate.code).map((candidate) => ({
+      id: candidate.code,
+      code: candidate.code,
+      name: candidate.name,
+    }))
+
+    if (match.status === 'ready' && match.code && match.studentName) {
+      return {
+        ...row,
+        status: 'resolved',
+        code: match.code,
+        studentName: match.studentName,
+        candidates,
+        message: t('data.name.identified', { p0: match.studentName, p1: match.code }),
+      }
+    }
+
+    if (allowUnknownCode && match.status === 'not-found') {
+      return { ...row, status: 'ready', candidates: [], message: undefined }
+    }
+
+    const status = match.status === 'ambiguous' || match.status === 'too-many'
+      ? match.status
+      : 'not-found'
+    return { ...row, status, candidates, message: match.message }
   }
 
   function syncExamStageResolution(): void {
@@ -2363,7 +2395,7 @@ export function mountShell(): void {
         </div>`
 
     const reason = row.message && row.status !== 'resolved' ? `<div class="bulk-resolve-reason">${escapeBulk(row.message)}</div>` : ''
-    const pay = exam ? '' : (row.status === 'resolved' && row.code) ? renderInlinePaymentControls(row.code) : ''
+    const pay = (row.status === 'resolved' && row.code) ? renderInlinePaymentControls(row.code) : ''
 
     // Both input kinds render the same resolved identity: name first, then its
     // ID. Exam rows keep their editable check-in fields inside this same row.
@@ -2375,7 +2407,7 @@ export function mountShell(): void {
     const examBadge = exam && labels
       ? `<span class="feature-badge ${exam.enabled ? 'on' : 'off'}">${exam.enabled ? labels.ready : labels.excluded}</span>`
       : ''
-    const examFields = exam && labels ? renderExamStageFields(exam, labels) : ''
+    const examFields = exam && labels ? renderExamStageFields(exam, labels, { hidePayment: bulkPayMode === 'center' }) : ''
     const examAttrs = exam ? ` data-exam-stage-row="${escapeBulk(exam.id)}"` : ''
 
     return `<div class="bulk-resolve-item ${cls}" data-resolve-key="${escapeBulk(row.key)}"${examAttrs}>
@@ -2627,9 +2659,9 @@ export function mountShell(): void {
       key,
       raw,
       query,
-      status: lessonId ? 'loading' : 'error',
+      status: lessonId || bulkExamMode ? 'loading' : 'error',
       candidates: [],
-      message: lessonId ? t('ui.common.searching') : t('ui.bulk.attendance.specifyLesson'),
+      message: lessonId || bulkExamMode ? t('ui.common.searching') : t('ui.bulk.attendance.specifyLesson'),
       payment,
     })
     bulkNameRows = bulkParsed.names.map((entry) => makeRow(entry.key, entry.raw, entry.query, entry.payment))
@@ -2644,20 +2676,22 @@ export function mountShell(): void {
       syncExamStageFromEntries(dedupeEntries(allExecutableEntries()))
       syncExamStageResolution()
     }
-    bulkResolving = (bulkNameRows.length + bulkCodeRows.length) > 0 && !!lessonId
+    bulkResolving = (bulkNameRows.length + bulkCodeRows.length) > 0 && (!!lessonId || bulkExamMode)
     renderBulkAnalysis()
 
-    if (!lessonId) {
+    if (!lessonId && !bulkExamMode) {
       bulkResolving = false
       renderBulkAnalysis()
       return
     }
 
-    const resolveRows = async (rows: NameRow[]): Promise<void> => {
+    const resolveRows = async (rows: NameRow[], useExamPage = false): Promise<void> => {
       for (let i = 0; i < rows.length; i++) {
         if (token !== bulkAnalysisToken) return
         const current = rows[i]
-        const resolved = await resolveNameEntry(current, lessonId)
+        const resolved = useExamPage
+          ? resolveExamEntryFromPage(current, rows === bulkCodeRows)
+          : await resolveNameEntry(current, lessonId)
         if (token !== bulkAnalysisToken) return
         rows[i] = { ...resolved, payment: current.payment }
         if (rows[i].payment && rows[i].status === 'resolved' && rows[i].code) {
@@ -2670,14 +2704,17 @@ export function mountShell(): void {
             })
           }
         }
-        if (bulkExamMode && examStageVisible()) syncExamStageResolution()
+        if (bulkExamMode && examStageVisible()) {
+          syncExamStageFromEntries(dedupeEntries(allExecutableEntries()))
+          syncExamStageResolution()
+        }
         renderBulkAnalysis()
       }
     }
 
-    await resolveRows(bulkNameRows)
+    await resolveRows(bulkNameRows, bulkExamMode)
     if (token !== bulkAnalysisToken) return
-    await resolveRows(bulkCodeRows)
+    await resolveRows(bulkCodeRows, bulkExamMode)
     if (token !== bulkAnalysisToken) return
     if (bulkExamMode && examStageVisible()) syncExamStageResolution()
     bulkResolving = false
@@ -2685,14 +2722,18 @@ export function mountShell(): void {
   }
 
   function renderAfterResolveChange(): void {
-    if (bulkExamMode && examStageVisible()) syncExamStageResolution()
+    if (bulkExamMode && examStageVisible()) {
+      syncExamStageFromEntries(dedupeEntries(allExecutableEntries()))
+      syncExamStageResolution()
+    }
     renderBulkAnalysis()
   }
 
   async function reResolveNameRow(key: string, nextQuery: string): Promise<void> {
     const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
-    if (!lessonId) return
     const rows = bulkNameRows.some((row) => row.key === key) ? bulkNameRows : bulkCodeRows
+    const isExamRow = bulkExamMode
+    if (!lessonId && !isExamRow) return
     const index = rows.findIndex((row) => row.key === key)
     if (index < 0) return
     const token = ++bulkAnalysisToken
@@ -2700,7 +2741,9 @@ export function mountShell(): void {
     rows[index] = { ...rows[index], query: nextQuery.trim() || rows[index].query, status: 'loading', message: t('ui.common.searching') }
     renderBulkAnalysis()
     const payment = rows[index].payment
-    const resolved = await resolveNameEntry(rows[index], lessonId)
+    const resolved = isExamRow
+      ? resolveExamEntryFromPage(rows[index], rows === bulkCodeRows)
+      : await resolveNameEntry(rows[index], lessonId)
     if (token !== bulkAnalysisToken) return
     rows[index] = { ...resolved, payment }
     if (payment && rows[index].status === 'resolved' && rows[index].code) {
@@ -3058,6 +3101,9 @@ export function mountShell(): void {
   exportLessonInput.addEventListener('input', refreshAttendanceExport)
 
   function updateBulkInputPlaceholder(): void {
+    bulkLessonInput.placeholder = bulkExamMode
+      ? currentExamId() || t('ui.common.lessonPlaceholder')
+      : t('ui.common.lessonPlaceholder')
     if (bulkPayMode === 'school') {
       bulkCodesInput.placeholder = t('ui.bulk.attendance.inputPlaceholderSchool')
     } else {
@@ -4226,6 +4272,19 @@ export function mountShell(): void {
         : t('ui.bulk.attendance.note')
     }
 
+    // Swap حصة → امتحان labels for the lesson-number field and mode toggle
+    const bulkLessonLabel = bulkRoot.querySelector<HTMLElement>('[data-i18n="ui.common.lessonLabel"]')
+    const bulkModeLabel = bulkRoot.querySelector<HTMLElement>('[data-i18n="ui.bulk.attendance.modeLabel"]')
+    if (bulkLessonLabel) {
+      bulkLessonLabel.textContent = examAttendance
+        ? t('ui.bulk.exam.lessonLabel')
+        : t('ui.common.lessonLabel')
+    }
+    if (bulkModeLabel) {
+      bulkModeLabel.textContent = examAttendance
+        ? t('ui.bulk.exam.modeLabel')
+        : t('ui.bulk.attendance.modeLabel')
+    }
     const evalTitle = evalRoot.querySelector<HTMLElement>('[data-eval-head-title]')
     const evalSubtitle = evalRoot.querySelector<HTMLElement>('[data-eval-head-subtitle]')
     const evalNote = evalRoot.querySelector<HTMLElement>('[data-eval-head-note]')
@@ -4269,6 +4328,7 @@ export function mountShell(): void {
     updateExamStagePanel()
 
     if (view === 'exam-attendance') {
+      updateBulkInputPlaceholder()
       refreshBulkLesson()
       invalidateBulkAnalysis()
       updateBulkButtons()

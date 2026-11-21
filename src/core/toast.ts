@@ -4,6 +4,16 @@ import { t } from './i18n'
 
 export type ToastVariant = 'applied' | 'undo' | 'redo' | 'error' | 'warning' | 'info'
 
+/** Match toast states to the sticker art currently shipped in public/rina/. */
+const toastSticker: Record<ToastVariant, string> = {
+  applied: 'applied',
+  undo: 'note',
+  redo: 'thumb',
+  error: 'err',
+  warning: 'limited',
+  info: 'note',
+}
+
 export interface ToastAction {
   label: string
   onClick: () => void
@@ -48,7 +58,7 @@ export function attachToaster(shadow: ShadowRoot): void {
 
     const icon = document.createElement('img')
     icon.className = 'toast-icon'
-    icon.src = rina[variant] ?? rina.applied ?? rina.logo ?? ''
+    icon.src = rina[toastSticker[variant]] ?? rina.applied ?? rina.logo ?? ''
     icon.alt = ''
     icon.setAttribute('aria-hidden', 'true')
     icon.draggable = false

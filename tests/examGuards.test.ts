@@ -44,13 +44,15 @@ describe('exam path and kind guards', () => {
 })
 
 describe('examTargetAllowed', () => {
-  it('accepts any student code, including several, for exam attendance', () => {
+  it('accepts student codes and names for exam attendance', () => {
     expect(examTargetAllowed('exam-attendance', '3766')).toBe(true)
     expect(examTargetAllowed('exam-attendance', ' 3766 \n')).toBe(true)
     expect(examTargetAllowed('exam-attendance', '1234')).toBe(true)
     expect(examTargetAllowed('exam-attendance', '3766\n1234')).toBe(true)
     expect(examTargetAllowed('exam-attendance', 'ABC-99')).toBe(true)
-    expect(examTargetAllowed('exam-attendance', 'أحمد')).toBe(false)
+    expect(examTargetAllowed('exam-attendance', 'أحمد')).toBe(true)
+    expect(examTargetAllowed('exam-attendance', '3766\nأحمد')).toBe(true)
+    expect(examTargetAllowed('exam-attendance', '3766\nAB')).toBe(false)
     expect(examTargetAllowed('exam-attendance', '')).toBe(false)
   })
 

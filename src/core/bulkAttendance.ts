@@ -733,7 +733,7 @@ export async function runBulkAttendance(options: {
   const undoRedo = getUndoRedoController()
   const timeoutMs = options.timeoutMs ?? 10000
   const examTarget = options.target === 'exam'
-  const paymentMode: PaymentMode = examTarget ? 'center' : (options.paymentMode ?? 'center')
+  const paymentMode: PaymentMode = options.paymentMode ?? 'center'
   const overrideMap = new Map<string, PaymentOverride>(
     (options.paymentOverrides ?? []).map((o) => [o.studentCode.toUpperCase(), o]),
   )

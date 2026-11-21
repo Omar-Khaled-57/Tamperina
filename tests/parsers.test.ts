@@ -1,11 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   parseBulkEntries,
   resolveNameEntry,
   searchStudents,
   type NameRow,
 } from '../src/core/bulkAttendance'
-import { parseEvaluationEntries } from '../src/core/bulkEvaluation'
+import { matchIdentifier, parseEvaluationEntries } from '../src/core/bulkEvaluation'
 
 const rosterStudent = {
   id: '88',
@@ -49,6 +49,10 @@ describe('student ID resolution', () => {
     `
   })
 
+  afterEach(() => {
+    window.history.pushState({}, '', '/')
+  })
+
   it('falls back to the lesson roster when the platform name search misses an ID', async () => {
     const fetchMock = mockStudentResponse((query) => query === '3766' ? [] : [rosterStudent])
 
@@ -58,6 +62,28 @@ describe('student ID resolution', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const queries = fetchMock.mock.calls.map(([input]) => new URL(String(input)).searchParams.get('q'))
     expect(queries).toEqual(['3766', ''])
+  })
+
+  it('resolves student names and codes from the rows already on the exam page', () => {
+    window.history.pushState({}, '', '/comprehensive-exams/16')
+    document.body.innerHTML = `
+      <table class="evaluation-table"><tbody>
+        <tr><td><div class="evaluation-student__info">
+          <strong>سارة</strong><small>3766 · قاعة ١</small>
+        </div></td></tr>
+      </tbody></table>
+    `
+
+    expect(matchIdentifier('3766')).toMatchObject({
+      status: 'ready',
+      code: '3766',
+      studentName: 'سارة',
+    })
+    expect(matchIdentifier('سارة')).toMatchObject({
+      status: 'ready',
+      code: '3766',
+      studentName: 'سارة',
+    })
   })
 
   it('resolves an ID row to the same identity fields as a name row', async () => {

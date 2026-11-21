@@ -109,4 +109,21 @@ describe('renderExamStageTable', () => {
     expect(html).toContain('data-exam-stage-remove')
     expect(html).toContain('data-exam-stage-add')
   })
+
+  it('hides payment inputs in center mode while keeping the entry source', () => {
+    const row: ExamStageRowView = {
+      id: 'stage-1',
+      enabled: true,
+      code: '3766',
+      options: { paymentStatus: 'paid', amountPaid: '0.00', paymentNote: '', source: 'manual' },
+    }
+    const container = document.createElement('div')
+    container.innerHTML = renderExamStageFields(row, labels, { hidePayment: true })
+
+    expect(container.firstElementChild?.classList.contains('center-mode')).toBe(true)
+    for (const field of ['paymentStatus', 'amountPaid', 'paymentNote']) {
+      expect(container.querySelector(`[data-exam-stage-field="${field}"]`)?.closest('label')?.hidden).toBe(true)
+    }
+    expect(container.querySelector('[data-exam-stage-field="source"]')?.closest('label')?.hidden).toBe(false)
+  })
 })

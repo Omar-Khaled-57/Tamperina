@@ -300,7 +300,9 @@
 .modal {
   width: min(520px, 94vw);
   max-height: 88vh;
-  overflow: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   overscroll-behavior: contain;
   background: var(--surface-alpha);
   -webkit-backdrop-filter: blur(20px);
@@ -321,6 +323,7 @@
 
 /* The header + tab strip form one top section; breathing room goes below it. */
 .modal-top {
+  flex-shrink: 0;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--border-60);
 }
@@ -429,9 +432,10 @@
 
 .panels {
   padding: 16px;
-  min-height: 180px;
-  max-height: min(70vh, 560px);
-  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .empty {
@@ -1374,31 +1378,95 @@
   gap: 8px;
 }
 
-.bulk-stage-review-fields {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
-  margin-top: 4px;
+.bulk-inline-pay.bulk-stage-review-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(232, 162, 74, 0.14);
+}
+
+.bulk-inline-pay.bulk-stage-review-fields.center-mode {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.bulk-inline-pay.bulk-stage-review-fields.center-mode .bulk-stage-review-source {
+  grid-column: 2;
+}
+
+.bulk-inline-pay.bulk-stage-review-fields.center-mode .bulk-resolve-actions {
+  grid-row: 3;
 }
 
 .bulk-stage-review-fields .bulk-inline-pay-field {
   display: grid;
   gap: 4px;
+  min-inline-size: 0;
+}
+
+.bulk-stage-review-fields .bulk-inline-pay-field[hidden] {
+  display: none;
+}
+
+.bulk-stage-review-fields .bulk-inline-pay-field .bulk-input {
+  min-inline-size: 0;
+}
+
+.bulk-stage-review-code {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.bulk-stage-review-status {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.bulk-stage-review-source {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.bulk-stage-review-amount {
+  grid-column: 1;
+  grid-row: 3;
+}
+
+.bulk-stage-review-note {
+  grid-column: 2 / 4;
+  grid-row: 3;
 }
 
 .bulk-stage-review-fields .bulk-stage-review-check {
+  grid-column: 1 / -1;
+  grid-row: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  min-height: 36px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
 }
 
-.bulk-stage-review-fields .bulk-input {
-  min-inline-size: 96px;
+/* Styled checkbox */
+.bulk-stage-review-check input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .bulk-stage-review-fields .bulk-resolve-actions {
-  margin-inline-start: auto;
+  grid-column: 1 / -1;
+  grid-row: 4;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .bulk-stage-review-fields .bulk-stage-remove {

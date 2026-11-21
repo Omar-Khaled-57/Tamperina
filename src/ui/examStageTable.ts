@@ -83,29 +83,34 @@ export function renderExamStageTable(rows: ExamStageRowView[], labels: ExamStage
 }
 
 /** Compact inline controls, matching normal attendance's inline payment row. */
-export function renderExamStageFields(row: ExamStageRowView, labels: ExamStageLabels): string {
-  return `<div class="bulk-inline-pay bulk-stage-review-fields">
+export function renderExamStageFields(
+  row: ExamStageRowView,
+  labels: ExamStageLabels,
+  options?: { hidePayment?: boolean },
+): string {
+  const hidePayment = options?.hidePayment ?? false
+  return `<div class="bulk-inline-pay bulk-stage-review-fields${hidePayment ? ' center-mode' : ''}">
     <label class="bulk-inline-pay-field bulk-stage-review-check" title="${labels.include}">
       <input type="checkbox" data-exam-stage-field="enabled" ${row.enabled ? 'checked' : ''} />
       <span>${labels.include}</span>
     </label>
-    <label class="bulk-inline-pay-field">
+    <label class="bulk-inline-pay-field bulk-stage-review-code">
       <span>${labels.studentCode}</span>
       <input class="bulk-input" dir="ltr" inputmode="text" data-exam-stage-field="code" placeholder="${escapeHtml(labels.codePlaceholder)}" value="${escapeHtml(row.code)}" />
     </label>
-    <label class="bulk-inline-pay-field">
+    <label class="bulk-inline-pay-field bulk-stage-review-status" ${hidePayment ? 'hidden' : ''}>
       <span>${labels.statusLabel}</span>
       <select class="bulk-input" data-exam-stage-field="paymentStatus">${optionList(STATUSES, row.options.paymentStatus, (v) => labels.status[v])}</select>
     </label>
-    <label class="bulk-inline-pay-field">
+    <label class="bulk-inline-pay-field bulk-stage-review-amount" ${hidePayment ? 'hidden' : ''}>
       <span>${labels.amountLabel}</span>
       <input class="bulk-input" dir="ltr" inputmode="decimal" data-exam-stage-field="amountPaid" value="${escapeHtml(row.options.amountPaid ?? '')}" />
     </label>
-    <label class="bulk-inline-pay-field">
+    <label class="bulk-inline-pay-field bulk-stage-review-note" ${hidePayment ? 'hidden' : ''}>
       <span>${labels.noteLabel}</span>
       <input class="bulk-input" data-exam-stage-field="paymentNote" value="${escapeHtml(row.options.paymentNote ?? '')}" />
     </label>
-    <label class="bulk-inline-pay-field">
+    <label class="bulk-inline-pay-field bulk-stage-review-source">
       <span>${labels.sourceLabel}</span>
       <select class="bulk-input" data-exam-stage-field="source">${optionList(SOURCES, row.options.source, (v) => labels.source[v])}</select>
     </label>

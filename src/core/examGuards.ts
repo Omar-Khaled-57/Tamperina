@@ -32,11 +32,11 @@ export function isExamBulkKind(kind: string): boolean {
   return kind === 'exam-attendance' || kind === 'exam-evaluation'
 }
 
-/** Validate the shape of exam input without restricting which students it names. */
+/** Validate exam attendance input, which may contain codes, names, or both. */
 export function examTargetAllowed(kind: string, text: string): boolean {
   if (kind === 'exam-attendance') {
     const parsed = parseBulkEntries(text)
-    return parsed.codes.length > 0 && parsed.names.length === 0 && parsed.invalid.length === 0
+    return parsed.codes.length + parsed.names.length > 0 && parsed.invalid.length === 0
   }
   if (kind === 'exam-evaluation') {
     const parsed = parseEvaluationEntries(text)
