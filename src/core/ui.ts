@@ -12,7 +12,13 @@ import shellStyle from '../ui/styles.css?style'
 import { escapeHtml } from '../ui/dom'
 import { installKeyShield, isEditableTarget, isGlobalShortcutKey } from '../ui/keyShield'
 import { ensureHoldPanel, placeHoldNotice, setPagePanelText } from '../ui/pagePanels'
-import { renderExamStageReview, renderExamStageTable, type ExamStageLabels, type ExamStageRowView } from '../ui/examStageTable'
+import {
+  renderExamStageFields,
+  renderExamStageReview,
+  renderExamStageTable,
+  type ExamStageLabels,
+  type ExamStageRowView,
+} from '../ui/examStageTable'
 import { icons } from '../icons'
 import { attachToaster, toast } from './toast'
 import { getUndoRedoController, type LiveRecord, type UndoRedoController } from './undoRedo'
@@ -1628,6 +1634,8 @@ export function mountShell(): void {
 
   interface ExamStageRow extends ExamStageRowView {
     label: string
+    /** Same resolved identity used by a normal attendance review row. */
+    resolved?: NameRow
   }
 
   let examStage: ExamStageRow[] = []
@@ -1644,14 +1652,54 @@ export function mountShell(): void {
     }
   }
 
+  function examStageResolvedRow(row: ExamStageRow): NameRow | undefined {
+    const code = normalizeStudentCode(row.code)
+    if (!code) return undefined
+    return bulkCodeRows.find((candidate) =>
+      normalizeStudentCode(candidate.code || candidate.query || candidate.raw) === code)
+  }
+
+  function stageResolvedRow(row: ExamStageRow): NameRow {
+    const resolved = row.resolved ?? examStageResolvedRow(row)
+    if (resolved) return resolved
+    return {
+      kind: 'name',
+      key: `stage-${row.id}`,
+      raw: row.code,
+      query: row.code,
+      status: bulkResolving ? 'loading' : 'ready',
+      candidates: [],
+      message: bulkResolving ? t('ui.common.searching') : undefined,
+    }
+  }
+
+  function syncExamStageResolution(): void {
+    for (const row of examStage) {
+      const resolved = examStageResolvedRow(row)
+      row.resolved = resolved
+      if (resolved?.status === 'resolved' && resolved.code) {
+        row.code = normalizeStudentCode(resolved.code)
+      }
+    }
+  }
+
   function examStageEntries(): Array<{ code: string, label?: string, exam?: ExamCheckinOptions }> {
-    return examStage
-      .filter((row) => row.enabled && !!normalizeStudentCode(row.code))
-      .map((row) => ({
-        code: normalizeStudentCode(row.code),
-        label: row.label || t('ui.bulk.menu.examAttendance.title'),
+    const result: Array<{ code: string, label?: string, exam?: ExamCheckinOptions }> = []
+    for (const row of examStage) {
+      if (!row.enabled || !normalizeStudentCode(row.code)) continue
+      const resolved = examStageResolvedRow(row)
+      if (resolved?.status === 'dropped') continue
+      const code = resolved?.status === 'resolved' && resolved.code
+        ? normalizeStudentCode(resolved.code)
+        : normalizeStudentCode(row.code)
+      if (!code) continue
+      result.push({
+        code,
+        label: resolved?.studentName || row.label || resolved?.raw || t('ui.bulk.menu.examAttendance.title'),
         exam: row.options,
-      }))
+      })
+    }
+    return result
   }
 
   function syncBulkCodesFromStage(): void {
@@ -1666,6 +1714,7 @@ export function mountShell(): void {
       bulkCodesInput.value = ''
       bulkParsed = null
       bulkNameRows = []
+      bulkCodeRows = []
       bulkArmed = false
       bulkPreviewBox.textContent = t('ui.bulk.exam.stage.empty')
       renderExamStage()
@@ -1721,13 +1770,20 @@ export function mountShell(): void {
   }
 
   function syncExamStageFromEntries(entries: Array<{ code: string, label?: string, exam?: ExamCheckinOptions }>): void {
-    const previous = new Map(examStage.map((row) => [row.code, row]))
+    const previous = new Map<string, ExamStageRow>()
+    for (const row of examStage) {
+      previous.set(normalizeStudentCode(row.code), row)
+      const original = row.resolved?.query || row.resolved?.raw
+      if (original) previous.set(normalizeStudentCode(original), row)
+    }
     const next: ExamStageRow[] = []
     for (const entry of entries) {
       const code = normalizeStudentCode(entry.code)
       if (!code) continue
       const existing = previous.get(code)
-      next.push(existing ? { ...existing, code, label: entry.label ?? existing.label } : makeExamStageRow(code, entry.label))
+      next.push(existing
+        ? { ...existing, code, label: entry.label ?? existing.label, resolved: existing.resolved }
+        : makeExamStageRow(code, entry.label))
     }
     // Keep blank rows the user just added so they can type the next student.
     for (const row of examStage) {
@@ -1741,6 +1797,8 @@ export function mountShell(): void {
   let bulkRan = false
   let bulkParsed: ParseEntriesResult | null = null
   let bulkNameRows: NameRow[] = []
+  /** Direct IDs/codes resolved into the same review rows as name inputs. */
+  let bulkCodeRows: NameRow[] = []
   let bulkArmed = false
   let bulkRunning = false
   let bulkResolving = false
@@ -2007,7 +2065,14 @@ export function mountShell(): void {
   function allExecutableEntries(): Array<{ code: string, label?: string }> {
     if (!bulkParsed) return []
     const result: Array<{ code: string, label?: string }> = []
-    for (const item of bulkParsed.codes) result.push({ code: item.code, label: item.raw })
+    for (const item of bulkParsed.codes) {
+      const row = bulkCodeRows.find((candidate) => candidate.key === `code-${item.key}`)
+      if (row?.status === 'dropped') continue
+      result.push({
+        code: row?.status === 'resolved' && row.code ? row.code.toUpperCase() : item.code,
+        label: row?.studentName ?? item.raw,
+      })
+    }
     for (const row of bulkNameRows) {
       if (row.status === 'dropped') continue
       if (row.status === 'resolved' && row.code) {
@@ -2229,6 +2294,106 @@ export function mountShell(): void {
     return true
   }
 
+  /** Single review row builder shared by normal attendance and exam check-in. */
+  function renderBulkRow(row: NameRow, exam?: ExamStageRow): string {
+    const statusText: Record<NameRow['status'], string> = {
+      ready: t('ui.common.ready'),
+      resolved: row.studentName ? t('ui.bulk.attendance.identifiedAs', { p0: `${row.studentName}${row.code ? ` (${row.code})` : ''}` }) : t('ui.bulk.attendance.identified'),
+      ambiguous: t('ui.bulk.attendance.ambiguousName'),
+      'not-found': t('ui.bulk.attendance.nameNotFound'),
+      'too-many': t('ui.common.tooMany'),
+      dropped: t('ui.bulk.attendance.droppedManual'),
+      'walk-in': row.message ? t('ui.bulk.attendance.walkInStatus', { p0: row.message }) : t('ui.bulk.attendance.walkInStatusShort'),
+      loading: t('ui.common.searching'),
+      error: t('ui.bulk.attendance.searchFailed'),
+    }
+    const cls = exam && !exam.enabled ? 'drop'
+      : row.status === 'resolved' || row.status === 'walk-in' ? 'ok'
+        : row.status === 'dropped' ? 'drop'
+          : row.status === 'loading' ? ''
+            : (row.status === 'ready' ? 'ok' : '')
+
+    let choicesHtml = ''
+    if ((row.status === 'ambiguous' || row.status === 'not-found' || row.status === 'too-many' || row.status === 'error' || row.status === 'resolved')
+      && row.candidates.length) {
+      const list = row.candidates.slice(0, 12)
+      const isChosen = (c: (typeof list)[number]): boolean => row.status === 'resolved'
+        && ((!!row.code && c.code === row.code) || (!row.code && c.name === row.studentName))
+      const choiceButton = (c: (typeof list)[number]): string => {
+        const chosen = isChosen(c)
+        return `<button type="button" class="bulk-choice ${chosen ? 'selected' : ''}"
+          data-resolve-action="choose" data-key="${escapeBulk(row.key)}"
+          data-id="${escapeBulk(c.id)}" data-code="${escapeBulk(c.code)}" data-name="${escapeBulk(c.name)}">
+          <span class="bulk-choice-label">
+            ${chosen ? `<span class="bulk-choice-mark">${t('ui.bulk.attendance.chosenMark')}</span>` : ''}
+            <span>${escapeBulk(c.name || t('ui.common.student'))}</span>
+          </span>
+          <small>${escapeBulk(c.code || t('ui.common.noCode'))}</small>
+        </button>`
+      }
+      if (row.status === 'resolved') {
+        const chosen = list.filter(isChosen)
+        const others = list.filter((c) => !isChosen(c))
+        if (chosen.length) {
+          choicesHtml += `<div class="bulk-resolve-chosen-note">${t('ui.bulk.attendance.chosenNote')}</div>
+            <div class="bulk-resolve-choices chosen-group">${chosen.map(choiceButton).join('')}</div>`
+        }
+        if (others.length) {
+          choicesHtml += `<div class="bulk-resolve-chosen-note muted">${t('ui.bulk.attendance.otherResultsNote')}</div>
+            <div class="bulk-resolve-choices other-group">${others.map(choiceButton).join('')}</div>`
+        }
+      } else {
+        choicesHtml = `<div class="bulk-resolve-choices">${list.map(choiceButton).join('')}</div>`
+      }
+      if (row.candidates.length > 12) {
+        choicesHtml += `<div class="bulk-note-inline">${t('ui.common.moreResults', { p0: row.candidates.length - 12 })}</div>`
+      }
+    }
+
+    const editHtml = row.status === 'dropped' || row.status === 'walk-in' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
+        <input type="text" class="bulk-input" data-resolve-edit="${escapeBulk(row.key)}" value="${escapeBulk(row.query)}" placeholder="${t('ui.bulk.attendance.editPlaceholder')}" />
+        <button type="button" class="bulk-mini-btn" data-resolve-action="research" data-key="${escapeBulk(row.key)}">${t('ui.bulk.attendance.research')}</button>
+      </div>`
+
+    const actions = row.status === 'dropped' || row.status === 'walk-in'
+      ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-resolve-action="undrop" data-key="${escapeBulk(row.key)}">${t('ui.common.restore')}</button></div>`
+      : `<div class="bulk-resolve-actions">
+          ${row.status === 'resolved' ? `<button type="button" class="bulk-mini-btn" data-resolve-action="change" data-key="${escapeBulk(row.key)}">${t('ui.common.change')}</button>` : ''}
+          <button type="button" class="bulk-mini-btn" data-resolve-action="drop" data-key="${escapeBulk(row.key)}">${t('ui.common.ignoreManual')}</button>
+        </div>`
+
+    const reason = row.message && row.status !== 'resolved' ? `<div class="bulk-resolve-reason">${escapeBulk(row.message)}</div>` : ''
+    const pay = exam ? '' : (row.status === 'resolved' && row.code) ? renderInlinePaymentControls(row.code) : ''
+
+    // Both input kinds render the same resolved identity: name first, then its
+    // ID. Exam rows keep their editable check-in fields inside this same row.
+    const identityName = row.studentName || row.raw || row.query
+    const identityCode = row.code
+      ? `<span class="bulk-resolve-id" dir="ltr" title="${escapeBulk(row.code)}">#${escapeBulk(row.code)}</span>`
+      : ''
+    const labels = exam ? examStageLabels() : null
+    const examBadge = exam && labels
+      ? `<span class="feature-badge ${exam.enabled ? 'on' : 'off'}">${exam.enabled ? labels.ready : labels.excluded}</span>`
+      : ''
+    const examFields = exam && labels ? renderExamStageFields(exam, labels) : ''
+    const examAttrs = exam ? ` data-exam-stage-row="${escapeBulk(exam.id)}"` : ''
+
+    return `<div class="bulk-resolve-item ${cls}" data-resolve-key="${escapeBulk(row.key)}"${examAttrs}>
+      <div class="bulk-resolve-head">
+        <span class="bulk-resolve-name">${escapeBulk(identityName)}</span>
+        ${identityCode}
+        <span class="feature-badge ${row.status === 'resolved' ? 'on' : row.status === 'dropped' ? 'off' : 'busy'}">${escapeBulk(statusText[row.status])}</span>
+        ${examBadge}
+      </div>
+      ${reason}
+      ${choicesHtml}
+      ${row.status === 'loading' ? '' : editHtml}
+      ${row.status === 'loading' ? '' : actions}
+      ${pay}
+      ${examFields}
+    </div>`
+  }
+
   function renderBulkResolve(): void {
     if (bulkParsed && bulkPayMode === 'school') seedPaymentOverridesFromParsed()
 
@@ -2238,99 +2403,24 @@ export function mountShell(): void {
     const undecided = pendingNameRows()
     const decidedNames = nameRows.filter((row) =>
       row.status === 'resolved' || row.status === 'walk-in')
-    const codeItems = (bulkPayMode === 'school' && bulkParsed) ? bulkParsed.codes : []
     // In exam attendance the staged students replace the separate stage table
     // after preview and use the same review-item markup as normal attendance.
-    const examReview = bulkExamMode && examStageVisible() && bulkParsed
-      ? renderExamStageReview(examStage, examStageLabels(), { addDisabled: bulkRunning })
+    const showExamStageReview = bulkExamMode && examStageVisible() && !!bulkParsed
+    const examReview = showExamStageReview
+      ? renderExamStageReview(examStage, examStageLabels(), {
+        addDisabled: bulkRunning,
+        renderRow: (stageRow) => renderBulkRow(stageResolvedRow(stageRow), stageRow),
+      })
       : ''
-    if (!examReview && !nameRows.length && !codeItems.length) {
+    // Direct IDs use the exact same resolved review rows as names, including
+    // the identified pill and inline payment controls when applicable.
+    if (!examReview && !nameRows.length && !bulkCodeRows.length) {
       bulkResolveBox.hidden = true
       bulkResolveBox.innerHTML = ''
       return
     }
 
-    const renderNameRow = (row: NameRow): string => {
-      const statusText: Record<NameRow['status'], string> = {
-        ready: t('ui.common.ready'),
-        resolved: row.studentName ? t('ui.bulk.attendance.identifiedAs', { p0: `${row.studentName}${row.code ? ` (${row.code})` : ''}` }) : t('ui.bulk.attendance.identified'),
-        ambiguous: t('ui.bulk.attendance.ambiguousName'),
-        'not-found': t('ui.bulk.attendance.nameNotFound'),
-        'too-many': t('ui.common.tooMany'),
-        dropped: t('ui.bulk.attendance.droppedManual'),
-        'walk-in': row.message ? t('ui.bulk.attendance.walkInStatus', { p0: row.message }) : t('ui.bulk.attendance.walkInStatusShort'),
-        loading: t('ui.common.searching'),
-        error: t('ui.bulk.attendance.searchFailed'),
-      }
-      const cls = row.status === 'resolved' || row.status === 'walk-in' ? 'ok'
-        : row.status === 'dropped' ? 'drop'
-        : row.status === 'loading' ? ''
-        : (row.status === 'ready' ? 'ok' : '')
-
-      let choicesHtml = ''
-      if ((row.status === 'ambiguous' || row.status === 'not-found' || row.status === 'too-many' || row.status === 'error' || row.status === 'resolved')
-        && row.candidates.length) {
-        const list = row.candidates.slice(0, 12)
-        const isChosen = (c: (typeof list)[number]): boolean => row.status === 'resolved'
-          && ((!!row.code && c.code === row.code) || (!row.code && c.name === row.studentName))
-        const choiceButton = (c: (typeof list)[number]): string => {
-          const chosen = isChosen(c)
-          return `<button type="button" class="bulk-choice ${chosen ? 'selected' : ''}"
-            data-resolve-action="choose" data-key="${escapeBulk(row.key)}"
-            data-id="${escapeBulk(c.id)}" data-code="${escapeBulk(c.code)}" data-name="${escapeBulk(c.name)}">
-            <span class="bulk-choice-label">
-              ${chosen ? `<span class="bulk-choice-mark">${t('ui.bulk.attendance.chosenMark')}</span>` : ''}
-              <span>${escapeBulk(c.name || t('ui.common.student'))}</span>
-            </span>
-            <small>${escapeBulk(c.code || t('ui.common.noCode'))}</small>
-          </button>`
-        }
-        if (row.status === 'resolved') {
-          const chosen = list.filter(isChosen)
-          const others = list.filter((c) => !isChosen(c))
-          if (chosen.length) {
-            choicesHtml += `<div class="bulk-resolve-chosen-note">${t('ui.bulk.attendance.chosenNote')}</div>
-              <div class="bulk-resolve-choices chosen-group">${chosen.map(choiceButton).join('')}</div>`
-          }
-          if (others.length) {
-            choicesHtml += `<div class="bulk-resolve-chosen-note muted">${t('ui.bulk.attendance.otherResultsNote')}</div>
-              <div class="bulk-resolve-choices other-group">${others.map(choiceButton).join('')}</div>`
-          }
-        } else {
-          choicesHtml = `<div class="bulk-resolve-choices">${list.map(choiceButton).join('')}</div>`
-        }
-        if (row.candidates.length > 12) {
-          choicesHtml += `<div class="bulk-note-inline">${t('ui.common.moreResults', { p0: row.candidates.length - 12 })}</div>`
-        }
-      }
-
-      const editHtml = row.status === 'dropped' || row.status === 'walk-in' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
-          <input type="text" class="bulk-input" data-resolve-edit="${escapeBulk(row.key)}" value="${escapeBulk(row.query)}" placeholder="${t('ui.bulk.attendance.editPlaceholder')}" />
-          <button type="button" class="bulk-mini-btn" data-resolve-action="research" data-key="${escapeBulk(row.key)}">${t('ui.bulk.attendance.research')}</button>
-        </div>`
-
-      const actions = row.status === 'dropped' || row.status === 'walk-in'
-        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-resolve-action="undrop" data-key="${escapeBulk(row.key)}">${t('ui.common.restore')}</button></div>`
-        : `<div class="bulk-resolve-actions">
-            ${row.status === 'resolved' ? `<button type="button" class="bulk-mini-btn" data-resolve-action="change" data-key="${escapeBulk(row.key)}">${t('ui.common.change')}</button>` : ''}
-            <button type="button" class="bulk-mini-btn" data-resolve-action="drop" data-key="${escapeBulk(row.key)}">${t('ui.common.ignoreManual')}</button>
-          </div>`
-
-      const reason = row.message && row.status !== 'resolved' ? `<div class="bulk-resolve-reason">${escapeBulk(row.message)}</div>` : ''
-      const pay = (row.status === 'resolved' && row.code) ? renderInlinePaymentControls(row.code) : ''
-
-      return `<div class="bulk-resolve-item ${cls}" data-resolve-key="${escapeBulk(row.key)}">
-        <div class="bulk-resolve-head">
-          <span class="bulk-resolve-name">${escapeBulk(row.raw)}</span>
-          <span class="feature-badge ${row.status === 'resolved' ? 'on' : row.status === 'dropped' ? 'off' : 'busy'}">${escapeBulk(statusText[row.status])}</span>
-        </div>
-        ${reason}
-        ${choicesHtml}
-        ${row.status === 'loading' ? '' : editHtml}
-        ${row.status === 'loading' ? '' : actions}
-        ${pay}
-      </div>`
-    }
+    const renderNameRow = (row: NameRow): string => renderBulkRow(row)
 
     let html = ''
 
@@ -2368,23 +2458,8 @@ export function mountShell(): void {
       </div>`
     }
 
-    if (codeItems.length) {
-      html += `<div class="bulk-resolve-group">`
-      html += codeItems.map((item) => {
-        const pay = renderInlinePaymentControls(item.code)
-        const paymentNote = item.payment
-          ? `<div class="bulk-note-inline">${t('ui.bulk.attendance.fromInput', { p0: `${escapeBulk(paymentStatusLabel(item.payment.status))}${item.payment.amountPaid != null ? ` — ${escapeBulk(String(item.payment.amountPaid))}` : ''}` })}</div>`
-          : ''
-        return `<div class="bulk-resolve-item ok" data-code-item="${escapeBulk(item.code)}">
-          <div class="bulk-resolve-head">
-            <span class="bulk-resolve-name" dir="ltr">${escapeBulk(item.raw || item.code)}</span>
-            <span class="feature-badge on">${escapeBulk(item.code)}</span>
-          </div>
-          ${paymentNote}
-          ${pay}
-        </div>`
-      }).join('')
-      html += `</div>`
+    if (bulkCodeRows.length && !showExamStageReview) {
+      html += `<div class="bulk-resolve-group">${bulkCodeRows.map(renderNameRow).join('')}</div>`
     }
 
     if (decidedNames.length) {
@@ -2448,6 +2523,7 @@ export function mountShell(): void {
     const dropped = bulkNameRows.filter((r) => r.status === 'dropped').length
     const walkInCount = bulkNameRows.filter((r) => r.status === 'walk-in').length
     const resolvedNames = bulkNameRows.filter((r) => r.status === 'resolved').length
+      + bulkCodeRows.filter((r) => r.status === 'resolved').length
 
     const parts: string[] = []
     parts.push(`<div class="bulk-preview-grid">
@@ -2509,6 +2585,7 @@ export function mountShell(): void {
     bulkResolving = false
     bulkParsed = null
     bulkNameRows = []
+    bulkCodeRows = []
     bulkArmed = false
     bulkPayOverrides.clear()
     bulkPreviewBox.textContent = t('ui.common.dataEdited')
@@ -2522,6 +2599,7 @@ export function mountShell(): void {
     if (!bulkSupported()) {
       bulkParsed = null
       bulkNameRows = []
+      bulkCodeRows = []
       renderBulkAnalysis()
       disarmBulk(t('ui.common.unavailable'))
       return
@@ -2531,6 +2609,7 @@ export function mountShell(): void {
       bulkAnalysisToken++
       bulkParsed = null
       bulkNameRows = []
+      bulkCodeRows = []
       bulkResolving = false
       bulkPreviewBox.innerHTML = `<div class="bulk-warn">${t('ui.bulk.exam.guard')}</div>`
       bulkResolveBox.hidden = true
@@ -2543,23 +2622,29 @@ export function mountShell(): void {
     const token = ++bulkAnalysisToken
     const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
     bulkParsed = parseBulkEntries(bulkCodesInput.value)
-    bulkNameRows = bulkParsed.names.map((entry) => ({
+    const makeRow = (key: string, raw: string, query: string, payment?: NameRow['payment']): NameRow => ({
       kind: 'name',
-      key: entry.key,
-      raw: entry.raw,
-      query: entry.query,
+      key,
+      raw,
+      query,
       status: lessonId ? 'loading' : 'error',
       candidates: [],
       message: lessonId ? t('ui.common.searching') : t('ui.bulk.attendance.specifyLesson'),
-      payment: entry.payment,
-    }))
+      payment,
+    })
+    bulkNameRows = bulkParsed.names.map((entry) => makeRow(entry.key, entry.raw, entry.query, entry.payment))
+    // Direct IDs — including exam stage IDs — go through the same resolution so
+    // their review row is identical to a name row: name + id + identified pill.
+    bulkCodeRows = bulkParsed.codes.map((entry) =>
+      makeRow(`code-${entry.key}`, entry.raw, entry.code, entry.payment))
     bulkArmed = false
     bulkPayOverrides.clear()
     seedPaymentOverridesFromParsed()
     if (bulkExamMode && examStageVisible()) {
       syncExamStageFromEntries(dedupeEntries(allExecutableEntries()))
+      syncExamStageResolution()
     }
-    bulkResolving = bulkNameRows.length > 0 && !!lessonId
+    bulkResolving = (bulkNameRows.length + bulkCodeRows.length) > 0 && !!lessonId
     renderBulkAnalysis()
 
     if (!lessonId) {
@@ -2568,51 +2653,63 @@ export function mountShell(): void {
       return
     }
 
-    for (let i = 0; i < bulkNameRows.length; i++) {
-      if (token !== bulkAnalysisToken) return
-      const current = bulkNameRows[i]
-      const resolved = await resolveNameEntry(current, lessonId)
-      if (token !== bulkAnalysisToken) return
-      // Preserve pending payment info from original name row
-      bulkNameRows[i] = { ...resolved, payment: current.payment }
-      if (bulkNameRows[i].payment && bulkNameRows[i].status === 'resolved' && bulkNameRows[i].code) {
-        const code = bulkNameRows[i].code!.toUpperCase()
-        if (!bulkPayOverrides.has(code)) {
-          bulkPayOverrides.set(code, {
-            studentCode: code,
-            status: bulkNameRows[i].payment!.status,
-            amountPaid: bulkNameRows[i].payment!.amountPaid,
-          })
+    const resolveRows = async (rows: NameRow[]): Promise<void> => {
+      for (let i = 0; i < rows.length; i++) {
+        if (token !== bulkAnalysisToken) return
+        const current = rows[i]
+        const resolved = await resolveNameEntry(current, lessonId)
+        if (token !== bulkAnalysisToken) return
+        rows[i] = { ...resolved, payment: current.payment }
+        if (rows[i].payment && rows[i].status === 'resolved' && rows[i].code) {
+          const code = rows[i].code!.toUpperCase()
+          if (!bulkPayOverrides.has(code)) {
+            bulkPayOverrides.set(code, {
+              studentCode: code,
+              status: rows[i].payment!.status,
+              amountPaid: rows[i].payment!.amountPaid,
+            })
+          }
         }
+        if (bulkExamMode && examStageVisible()) syncExamStageResolution()
+        renderBulkAnalysis()
       }
-      renderBulkAnalysis()
     }
 
+    await resolveRows(bulkNameRows)
     if (token !== bulkAnalysisToken) return
+    await resolveRows(bulkCodeRows)
+    if (token !== bulkAnalysisToken) return
+    if (bulkExamMode && examStageVisible()) syncExamStageResolution()
     bulkResolving = false
+    renderBulkAnalysis()
+  }
+
+  function renderAfterResolveChange(): void {
+    if (bulkExamMode && examStageVisible()) syncExamStageResolution()
     renderBulkAnalysis()
   }
 
   async function reResolveNameRow(key: string, nextQuery: string): Promise<void> {
     const lessonId = bulkLessonInput.value.trim() || currentLessonIdFromPage() || ''
     if (!lessonId) return
-    const index = bulkNameRows.findIndex((row) => row.key === key)
+    const rows = bulkNameRows.some((row) => row.key === key) ? bulkNameRows : bulkCodeRows
+    const index = rows.findIndex((row) => row.key === key)
     if (index < 0) return
     const token = ++bulkAnalysisToken
     bulkArmed = false
-    bulkNameRows[index] = { ...bulkNameRows[index], query: nextQuery.trim() || bulkNameRows[index].query, status: 'loading', message: t('ui.common.searching') }
+    rows[index] = { ...rows[index], query: nextQuery.trim() || rows[index].query, status: 'loading', message: t('ui.common.searching') }
     renderBulkAnalysis()
-    const payment = bulkNameRows[index].payment
-    const resolved = await resolveNameEntry(bulkNameRows[index], lessonId)
+    const payment = rows[index].payment
+    const resolved = await resolveNameEntry(rows[index], lessonId)
     if (token !== bulkAnalysisToken) return
-    bulkNameRows[index] = { ...resolved, payment }
-    if (payment && bulkNameRows[index].status === 'resolved' && bulkNameRows[index].code) {
-      const code = bulkNameRows[index].code!.toUpperCase()
+    rows[index] = { ...resolved, payment }
+    if (payment && rows[index].status === 'resolved' && rows[index].code) {
+      const code = rows[index].code!.toUpperCase()
       if (!bulkPayOverrides.has(code)) {
         bulkPayOverrides.set(code, { studentCode: code, status: payment.status, amountPaid: payment.amountPaid })
       }
     }
-    renderBulkAnalysis()
+    renderAfterResolveChange()
   }
 
   /**
@@ -3077,20 +3174,27 @@ export function mountShell(): void {
 
     if (action === 'drop-all') {
       let changed = false
-      bulkNameRows = bulkNameRows.map((row) => {
+      const dropUnresolved = (rows: NameRow[]): NameRow[] => rows.map((row) => {
         if (row.status === 'resolved' || row.status === 'dropped' || row.status === 'walk-in') return row
         changed = true
         return { ...row, status: 'dropped' as const, message: t('ui.bulk.attendance.ignoredMessage') }
       })
+      bulkNameRows = dropUnresolved(bulkNameRows)
+      bulkCodeRows = dropUnresolved(bulkCodeRows)
       if (changed) {
         bulkArmed = false
-        renderBulkAnalysis()
+        renderAfterResolveChange()
       }
       return
     }
 
     const key = btn.dataset.key || ''
-    const index = bulkNameRows.findIndex((row) => row.key === key)
+    let rows = bulkNameRows
+    let index = rows.findIndex((row) => row.key === key)
+    if (index < 0) {
+      rows = bulkCodeRows
+      index = rows.findIndex((row) => row.key === key)
+    }
     if (index < 0) return
 
     if (action === 'choose') {
@@ -3100,42 +3204,42 @@ export function mountShell(): void {
         toast({ title: t('ui.bulk.attendance.noCodeTitle'), description: t('ui.bulk.attendance.noCodeDesc'), variant: 'warning' })
         return
       }
-      bulkNameRows[index] = {
-        ...bulkNameRows[index],
+      rows[index] = {
+        ...rows[index],
         status: 'resolved',
         code,
         studentName: name,
         message: t('ui.bulk.attendance.chosenMessage', { p0: name, p1: code ? ` (${code})` : '' }),
       }
       bulkArmed = false
-      renderBulkAnalysis()
+      renderAfterResolveChange()
       return
     }
 
     if (action === 'drop') {
-      bulkNameRows[index] = { ...bulkNameRows[index], status: 'dropped', message: t('ui.bulk.attendance.ignoredMessage') }
+      rows[index] = { ...rows[index], status: 'dropped', message: t('ui.bulk.attendance.ignoredMessage') }
       bulkArmed = false
-      renderBulkAnalysis()
+      renderAfterResolveChange()
       return
     }
 
     if (action === 'undrop' || action === 'change') {
-      const nextStatus = bulkNameRows[index].candidates.length ? 'ambiguous' : 'not-found'
-      bulkNameRows[index] = {
-        ...bulkNameRows[index],
+      const nextStatus = rows[index].candidates.length ? 'ambiguous' : 'not-found'
+      rows[index] = {
+        ...rows[index],
         status: nextStatus,
         code: undefined,
         studentName: undefined,
         message: undefined,
       }
       bulkArmed = false
-      renderBulkAnalysis()
+      renderAfterResolveChange()
       return
     }
 
     if (action === 'research') {
       const edit = bulkResolveBox.querySelector<HTMLInputElement>(`[data-resolve-edit="${CSS.escape(key)}"]`)
-      const nextQuery = edit?.value.trim() || bulkNameRows[index].query
+      const nextQuery = edit?.value.trim() || rows[index].query
       void reResolveNameRow(key, nextQuery)
     }
   })

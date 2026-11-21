@@ -83,7 +83,7 @@ export function renderExamStageTable(rows: ExamStageRowView[], labels: ExamStage
 }
 
 /** Compact inline controls, matching normal attendance's inline payment row. */
-function reviewFields(row: ExamStageRowView, labels: ExamStageLabels): string {
+export function renderExamStageFields(row: ExamStageRowView, labels: ExamStageLabels): string {
   return `<div class="bulk-inline-pay bulk-stage-review-fields">
     <label class="bulk-inline-pay-field bulk-stage-review-check" title="${labels.include}">
       <input type="checkbox" data-exam-stage-field="enabled" ${row.enabled ? 'checked' : ''} />
@@ -115,27 +115,26 @@ function reviewFields(row: ExamStageRowView, labels: ExamStageLabels): string {
   </div>`
 }
 
+export interface ExamStageReviewOptions<T extends ExamStageRowView = ExamStageRowView> {
+  addDisabled?: boolean
+  /**
+   * The shell supplies the exact normal-attendance review row renderer. Exam
+   * options are appended inside that row, not in a separate table.
+   */
+  renderRow: (row: T) => string
+}
+
 /**
- * Post-preview review rows use the same `.bulk-resolve-item` shape as ordinary
- * bulk attendance, so exam students look and behave like normal review items.
- * The editable check-in options stay inside the row instead of a second table.
+ * Post-preview exam rows are rendered by the same row builder as ordinary
+ * attendance. This function only provides the section header around them.
  */
-export function renderExamStageReview(
-  rows: ExamStageRowView[],
+export function renderExamStageReview<T extends ExamStageRowView>(
+  rows: T[],
   labels: ExamStageLabels,
-  options: { addDisabled?: boolean } = {},
+  options: ExamStageReviewOptions<T>,
 ): string {
   const studentRows = rows.length
-    ? rows.map((row) => {
-      const student = row.code || labels.codePlaceholder
-      return `<div class="bulk-resolve-item ${row.enabled ? 'ok' : 'drop'}" data-exam-stage-row="${escapeHtml(row.id)}">
-        <div class="bulk-resolve-head">
-          <span class="bulk-resolve-name" dir="ltr" title="${escapeHtml(student)}">${escapeHtml(student)}</span>
-          <span class="feature-badge ${row.enabled ? 'on' : 'off'}">${row.enabled ? labels.ready : labels.excluded}</span>
-        </div>
-        ${reviewFields(row, labels)}
-      </div>`
-    }).join('')
+    ? rows.map((row) => options.renderRow(row)).join('')
     : `<div class="bulk-note-inline">${labels.empty}</div>`
 
   return `<div class="bulk-stage-review">

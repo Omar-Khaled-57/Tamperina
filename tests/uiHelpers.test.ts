@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { placeHoldNotice, setPagePanelText } from '../src/ui/pagePanels'
-import { renderExamStageReview, renderExamStageTable, type ExamStageLabels } from '../src/ui/examStageTable'
+import {
+  renderExamStageFields,
+  renderExamStageReview,
+  renderExamStageTable,
+  type ExamStageLabels,
+  type ExamStageRowView,
+} from '../src/ui/examStageTable'
 
 const labels: ExamStageLabels = {
   title: 'Editable attendance stage',
@@ -77,13 +83,22 @@ describe('renderExamStageTable', () => {
     expect(html).not.toContain('<note>')
   })
 
-  it('renders post-preview rows in the normal attendance review style', () => {
-    const html = renderExamStageReview([{
+  it('renders post-preview rows with the shared normal-attendance row builder', () => {
+    const rows: ExamStageRowView[] = [{
       id: 'stage-1',
       enabled: false,
       code: '3766',
       options: { paymentStatus: 'paid', amountPaid: '0.00', paymentNote: '', source: 'manual' },
-    }], labels)
+    }]
+    const html = renderExamStageReview(rows, labels, {
+      renderRow: (row) => `<div class="bulk-resolve-item ${row.enabled ? 'ok' : 'drop'}" data-exam-stage-row="${row.id}">
+        <div class="bulk-resolve-head">
+          <span class="bulk-resolve-name">${row.code}</span>
+          <span class="feature-badge ${row.enabled ? 'on' : 'off'}">${row.enabled ? labels.ready : labels.excluded}</span>
+        </div>
+        ${renderExamStageFields(row, labels)}
+      </div>`,
+    })
     expect(html).toContain('bulk-resolve-item')
     expect(html).toContain('bulk-resolve-head')
     expect(html).toContain('data-exam-stage-row="stage-1"')

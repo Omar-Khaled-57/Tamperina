@@ -362,10 +362,15 @@ export function parseBulkEntries(text: string): ParseEntriesResult {
   return { codes, names, duplicates, invalid, totalTokens }
 }
 
-export async function searchStudents(
+interface StudentSearchPage {
+  candidates: StudentCandidate[]
+  tooMany: boolean
+}
+
+async function fetchStudentsPage(
   query: string,
   lessonId: string,
-): Promise<StudentCandidate[] | { tooMany: true } | { error: string }> {
+): Promise<StudentSearchPage | { error: string }> {
   const scan = detectScanForm()
   if (!scan?.studentsUrl) return { error: t('data.search.noUrl') }
 
@@ -383,9 +388,8 @@ export async function searchStudents(
 
     const json = await response.json()
     if (!Array.isArray(json)) return { error: t('data.search.unexpected') }
-    if (json.length >= 100) return { tooMany: true }
 
-    return json.map((item) => {
+    const candidates = json.map((item) => {
       const obj = (item && typeof item === 'object') ? item as Record<string, unknown> : {}
       const profile = (obj.student_profile && typeof obj.student_profile === 'object')
         ? obj.student_profile as Record<string, unknown>
@@ -397,9 +401,33 @@ export async function searchStudents(
         code,
       }
     }).filter((c) => c.code || c.name)
+
+    return { candidates, tooMany: json.length >= 100 }
   } catch (error) {
     return { error: error instanceof Error ? error.message : t('data.search.connectionFailed') }
   }
+}
+
+export async function searchStudents(
+  query: string,
+  lessonId: string,
+): Promise<StudentCandidate[] | { tooMany: true } | { error: string }> {
+  const first = await fetchStudentsPage(query, lessonId)
+  if ('error' in first) return first
+  if (first.tooMany) return { tooMany: true }
+  if (first.candidates.length) return first.candidates
+
+  // The platform search is name-first. A student ID is the strongest identifier,
+  // so if a code-like query returns nothing, check the lesson roster directly
+  // and match the code client-side.
+  const normalized = normalizeName(query)
+  if (!CODE_RE.test(normalized.toUpperCase())) return []
+
+  const roster = await fetchStudentsPage('', lessonId)
+  if ('error' in roster) return roster
+  const matches = roster.candidates.filter((candidate) => normalizeName(candidate.code) === normalized)
+  if (matches.length) return matches
+  return roster.tooMany ? { tooMany: true } : []
 }
 
 function candidateMatchesQuery(candidate: StudentCandidate, query: string): boolean {
