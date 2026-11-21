@@ -1,4 +1,5 @@
 import { GM_getValue, GM_setValue, unsafeWindow } from '$'
+import { getLocale, listSeparator, t } from './i18n'
 import { toast } from './toast'
 
 /**
@@ -141,6 +142,10 @@ export interface UndoRedoController {
 }
 
 const SUPPORTED_PATHS = new Set(['/attendance/scan', '/evaluation'])
+const EXAM_PAGE_RE = /^\/comprehensive-exams\/\d+$/
+const EXAM_CHECKIN_RE = /^\/comprehensive-exams\/\d+\/check-in$/
+const GRADE_ROWS_SELECTOR = '.evaluation-table tbody tr, [data-grade-row]'
+const GRADE_PAGE_RE = /^\/(?:evaluation|comprehensive-exams\/\d+)$/
 const ENABLED_KEY = 'tamperina.feature.undoRedo.enabled.v1'
 const CONTROLLER_VERSION = 'v3'
 const CONTROLLER_KEY = `__tamperinaUndoRedoController_${CONTROLLER_VERSION}`
@@ -162,6 +167,61 @@ function sessionStore(): Storage | null {
   } catch {
     return null
   }
+}
+
+const ACTION_KINDS = new Set(['attendance-add', 'attendance-remove', 'grade', 'batch'])
+const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isValidLiveRecord(value: unknown): value is LiveRecord {
+  return isPlainObject(value) && typeof value.id === 'string'
+}
+
+function isValidGradeSnapshot(value: unknown): value is GradeSnapshot {
+  if (!isPlainObject(value)) return false
+  if (typeof value.key !== 'string' || typeof value.code !== 'string') return false
+  if (!Array.isArray(value.fields)) return false
+  return value.fields.every((field) => {
+    if (!isPlainObject(field)) return false
+    return typeof field.name === 'string' && typeof field.type === 'string'
+      && typeof field.value === 'string'
+      && (field.checked === undefined || typeof field.checked === 'boolean')
+  })
+}
+
+function isValidHttpCommand(value: unknown): value is HttpCommand {
+  if (!isPlainObject(value)) return false
+  if (typeof value.url !== 'string' || typeof value.method !== 'string') return false
+  if (!HTTP_METHODS.has(value.method)) return false
+  if (value.body != null && !isPlainObject(value.body)) return false
+  if (value.headers != null && !isPlainObject(value.headers)) return false
+  return true
+}
+
+/**
+ * sessionStorage is page-writable and survives script upgrades, so a restored
+ * history can contain malformed actions. Validate the full shape recursively
+ * before reviving; `reviveAction()` only checks the outer shape, and a bad
+ * nested `fields`/`body` would otherwise throw later at replay time.
+ */
+function isValidSerializedAction(value: unknown): value is SerializedAction {
+  if (!isPlainObject(value)) return false
+  if (typeof value.id !== 'string' || typeof value.at !== 'number') return false
+  const kind = value.kind
+  if (typeof kind !== 'string' || !ACTION_KINDS.has(kind)) return false
+  if (kind === 'batch') {
+    return Array.isArray(value.actions) && value.actions.every(isValidSerializedAction)
+  }
+  if (kind === 'attendance-add' || kind === 'attendance-remove') {
+    return isValidLiveRecord(value.record)
+  }
+  // grade
+  return isValidHttpCommand(value.command)
+    && isValidGradeSnapshot(value.before)
+    && isValidGradeSnapshot(value.after)
 }
 
 function loadPersistedState(): PersistedState | null {
@@ -197,8 +257,17 @@ function normalisePath(pathname: string): string {
   return pathname
 }
 
+function isExamPage(): boolean {
+  return EXAM_PAGE_RE.test(normalisePath(location.pathname))
+}
+
+function isGradePage(): boolean {
+  return normalisePath(location.pathname) === '/evaluation' || isExamPage()
+}
+
 function isSupportedPage(): boolean {
-  return SUPPORTED_PATHS.has(normalisePath(location.pathname))
+  const path = normalisePath(location.pathname)
+  return SUPPORTED_PATHS.has(path) || isExamPage()
 }
 
 function loadEnabled(): boolean {
@@ -246,7 +315,8 @@ function parseBody(body: unknown): unknown {
 }
 
 function encodeBody(body: Record<string, unknown>, headers?: Record<string, string>): string {
-  const contentType = String(headers?.['content-type'] ?? '').toLowerCase()
+  const contentTypeKey = Object.keys(headers ?? {}).find((key) => key.toLowerCase() === 'content-type')
+  const contentType = String(contentTypeKey ? headers?.[contentTypeKey] : '').toLowerCase()
   if (contentType.includes('application/x-www-form-urlencoded')) {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(body)) {
@@ -282,7 +352,9 @@ function replayHeaders(value: unknown): Record<string, string> {
   for (const [key, item] of entries) {
     const lower = key.toLowerCase()
     if (!allowed.has(lower) || item == null) continue
-    result[lower] = String(item)
+    // Preserve the request's original content-type for non-JSON bodies; send()
+    // provides application/json only when this header is absent.
+    result[lower === 'content-type' ? 'Content-Type' : lower] = String(item)
   }
   return result
 }
@@ -326,7 +398,11 @@ function studentCode(record: LiveRecord | null | undefined): string {
 }
 
 function toLessonId(value: unknown): string | number | null | undefined {
-  if (typeof value === 'string' || typeof value === 'number' || value == null) return value
+  // `null`/empty from the API means "no lesson", not an authoritative value:
+  // returning undefined lets callers fall back to the known lesson id instead
+  // of tagging records with a null lesson that matches every lesson filter.
+  if (value == null || value === '') return undefined
+  if (typeof value === 'string' || typeof value === 'number') return value
   return undefined
 }
 
@@ -376,7 +452,7 @@ function labelFor(record: LiveRecord): string {
   const code = studentCode(record)
   const name = record.name?.trim()
   if (name && code) return `${name} (${code})`
-  return name || code || 'الطالب'
+  return name || code || t('core.student.fallback')
 }
 
 function snapshotFromDom(id: string): LiveRecord | null {
@@ -400,10 +476,15 @@ function snapshotFromDom(id: string): LiveRecord | null {
 
 function gradeCodeFromRow(row: HTMLElement): string {
   const info = row.querySelector('.evaluation-student__info small')?.textContent?.trim() ?? ''
+  const examCode = row.matches('[data-grade-row]')
+    ? (row.querySelector<HTMLElement>('td > small')?.textContent?.trim()
+      ?? [...(row.getAttribute('data-search') ?? '').trim().split(/\s+/)].reverse().find((bit) => /^\d+$/.test(bit)))
+    : ''
   return info.split('·')[0]?.trim()
     || row.getAttribute('data-student-code')
     || row.getAttribute('data-student-id')
     || row.querySelector('.student-code')?.textContent?.trim()
+    || examCode
     || ''
 }
 
@@ -413,14 +494,15 @@ function gradeRowKey(row: HTMLElement): string | null {
 }
 
 function gradeRowLabel(row: HTMLElement): string {
-  const name = row.querySelector('.evaluation-student__info strong')?.textContent?.trim() || ''
+  const name = row.querySelector('.evaluation-student__info strong')?.textContent?.trim()
+    || (row.matches('[data-grade-row]') ? row.querySelector<HTMLElement>('td > strong')?.textContent?.trim() ?? '' : '')
   const code = gradeCodeFromRow(row)
-  return name && code ? `${name} (${code})` : name || code || 'الطالب'
+  return name && code ? `${name} (${code})` : name || code || t('core.student.fallback')
 }
 
 function gradeRowFromTarget(target: EventTarget | null): HTMLElement | null {
   const element = target as Element | null
-  return (element?.closest?.('.evaluation-table tbody tr') as HTMLElement | null) ?? null
+  return (element?.closest?.(GRADE_ROWS_SELECTOR) as HTMLElement | null) ?? null
 }
 
 function snapshotGradeRow(row: HTMLElement): GradeSnapshot | null {
@@ -429,7 +511,7 @@ function snapshotGradeRow(row: HTMLElement): GradeSnapshot | null {
 
   // Some evaluation tables put the score/grade controls straight in the row
   // instead of wrapping them in a <form>. Snapshot the row itself then.
-  const scope: ParentNode = row.querySelector<HTMLFormElement>('form') ?? row
+  const scope: ParentNode = row.querySelector<HTMLFormElement>('form.grade-form[data-url]') ?? row.querySelector<HTMLFormElement>('form') ?? row
   const fields: GradeField[] = []
   for (const element of Array.from(scope.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input, select, textarea'))) {
     const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
@@ -546,8 +628,15 @@ function createController(): UndoRedoController {
   const gradeBaselines = new Map<string, GradeSnapshot>(
     (persisted?.gradeBaselines ?? []).filter((snapshot) => !!snapshot?.key).map((snapshot) => [snapshot.key, snapshot]),
   )
-  const past: HistoryAction[] = (persisted?.past ?? []).map(reviveAction).filter(Boolean)
-  const future: HistoryAction[] = (persisted?.future ?? []).map(reviveAction).filter(Boolean)
+  const reviveSafely = (serialized: SerializedAction): HistoryAction | null => {
+    try { return reviveAction(serialized) } catch { return null }
+  }
+  const reviveAll = (items: SerializedAction[]): HistoryAction[] => items
+    .filter(isValidSerializedAction)
+    .map(reviveSafely)
+    .filter((action): action is HistoryAction => action !== null)
+  const past: HistoryAction[] = reviveAll(persisted?.past ?? [])
+  const future: HistoryAction[] = reviveAll(persisted?.future ?? [])
   const observed: UndoRedoDebugObservation[] = []
 
   let lastTouchedGradeRow: HTMLElement | null = null
@@ -588,6 +677,7 @@ function createController(): UndoRedoController {
   }
 
   let sessionPath = normalisePath(location.pathname)
+  let gradeListenersInstalled = false
 
   function resetForNavigation(): void {
     const path = normalisePath(location.pathname)
@@ -596,9 +686,16 @@ function createController(): UndoRedoController {
 
     // History now lives for the whole browser session, not just the current
     // page. Only page-scoped grade state is reset on navigation.
-    if (path !== '/evaluation') {
+    if (!GRADE_PAGE_RE.test(path)) {
       gradeBaselines.clear()
       lastTouchedGradeRow = null
+    } else {
+      // The script may have started off /evaluation, in which case the grade
+      // listeners were never installed. Install them on entry so the pre-edit
+      // baseline is captured; otherwise the first save would snapshot the
+      // already-changed value and no undo action could be recorded.
+      installGradeListeners()
+      syncGradeBaseline()
     }
     notify()
   }
@@ -638,8 +735,8 @@ function createController(): UndoRedoController {
   function buildPostBody(record: LiveRecord): Record<string, unknown> {
     const student = studentCode(record)
     const lessonId = toPositiveLessonId(record.lessonId ?? currentLessonId)
-    if (!student) throw new Error('تعذّر تحديد الطالب لاستعادة الحضور')
-    if (!lessonId) throw new Error('تعذّر تحديد الحصة لاستعادة الحضور')
+    if (!student) throw new Error(t('core.undo.error.studentMissing'))
+    if (!lessonId) throw new Error(t('core.undo.error.lessonMissing'))
     return {
       student,
       lesson_id: lessonId,
@@ -666,26 +763,28 @@ function createController(): UndoRedoController {
 
   function restoredRecordFrom(response: unknown, fallback: LiveRecord): LiveRecord {
     const id = idFrom(response)
-    if (!id) throw new Error('لم يُرجع الخادم معرّف سجل الحضور بعد الإعادة')
+    if (!id) throw new Error(t('core.undo.error.noRestoredId'))
     return normaliseLiveRecord(response, { ...fallback, id }) ?? { ...fallback, id }
   }
 
   async function send(command: HttpCommand): Promise<unknown> {
     const fetchFn = nativeFetch ?? page.fetch?.bind(page)
-    if (!fetchFn) throw new Error('تعذّر إرسال الطلب')
+    if (!fetchFn) throw new Error(t('core.undo.error.sendFailed'))
+
+    // Headers are case-insensitive: fetch() joins differently-cased duplicates
+    // into one value, so only add the JSON default when the command has none.
+    const hasContentType = Object.keys(command.headers ?? {}).some((key) => key.toLowerCase() === 'content-type')
+    const headers: Record<string, string> = { Accept: 'application/json', ...command.headers }
+    if (command.body && !hasContentType) headers['Content-Type'] = 'application/json'
 
     const response = await fetchFn(command.url, {
       method: command.method,
       credentials: 'same-origin',
-      headers: {
-        Accept: 'application/json',
-        ...(command.body ? { 'Content-Type': 'application/json' } : {}),
-        ...command.headers,
-      },
+      headers,
       body: command.body ? encodeBody(command.body, command.headers) : undefined,
     })
 
-    if (!response.ok) throw new Error(`فشل الطلب (${response.status})`)
+    if (!response.ok) throw new Error(t('core.undo.error.requestFailed', { p0: response.status }))
 
     const text = await response.text()
     return parseJson(text)
@@ -711,8 +810,8 @@ function createController(): UndoRedoController {
     const code = studentCode(record)
     const data: SerializedAction = {
       id: restored?.id ?? nextId(),
-      title: restored?.title ?? `تسجيل حضور ${label}`,
-      detail: restored?.detail ?? (code ? `كود الطالب ${code}` : 'عملية حضور'),
+      title: restored?.title ?? t('core.undo.title.attendanceAdded', { p0: label }),
+      detail: restored?.detail ?? (code ? t('core.undo.detail.studentCode', { p0: code }) : t('core.undo.detail.attendance')),
       at: restored?.at ?? Date.now(),
       ...(restored?.warning ? { warning: restored.warning } : {}),
       kind: 'attendance-add',
@@ -729,7 +828,7 @@ function createController(): UndoRedoController {
       serialized: data,
       undo: async () => {
         const response = await send(deleteCommand(record.id, headers))
-        if (!isDeleteSuccess(response)) throw new Error('لم يؤكد الخادم حذف سجل الحضور')
+        if (!isDeleteSuccess(response)) throw new Error(t('core.undo.error.deleteNotConfirmed'))
         forgetRecord(record.id)
         // Undo deleted the record; redo must re-create it, so keep an
         // "added" action in the future stack rather than flipping its type.
@@ -753,8 +852,8 @@ function createController(): UndoRedoController {
     const code = studentCode(record)
     const data: SerializedAction = {
       id: restored?.id ?? nextId(),
-      title: restored?.title ?? `حذف حضور ${label}`,
-      detail: restored?.detail ?? (code ? `كود الطالب ${code}` : 'عملية حضور'),
+      title: restored?.title ?? t('core.undo.title.attendanceRemoved', { p0: label }),
+      detail: restored?.detail ?? (code ? t('core.undo.detail.studentCode', { p0: code }) : t('core.undo.detail.attendance')),
       at: restored?.at ?? Date.now(),
       ...(restored?.warning ? { warning: restored.warning } : {}),
       kind: 'attendance-remove',
@@ -779,7 +878,7 @@ function createController(): UndoRedoController {
       },
       redo: async () => {
         const response = await send(deleteCommand(record.id, headers))
-        if (!isDeleteSuccess(response)) throw new Error('لم يؤكد الخادم حذف سجل الحضور')
+        if (!isDeleteSuccess(response)) throw new Error(t('core.undo.error.deleteNotConfirmed'))
         forgetRecord(record.id)
         return makeRemovedAction(record, headers)
       },
@@ -788,7 +887,7 @@ function createController(): UndoRedoController {
 
   /** Called by our grading tools before they write, so "before" is the saved value. */
   function captureGradeBaseline(row: HTMLElement): void {
-    if (normalisePath(location.pathname) !== '/evaluation') return
+    if (!isGradePage()) return
     const snapshot = snapshotGradeRow(row)
     if (!snapshot) return
     lastTouchedGradeRow = row
@@ -797,8 +896,8 @@ function createController(): UndoRedoController {
   }
 
   function syncGradeBaseline(): void {
-    if (normalisePath(location.pathname) !== '/evaluation') return
-    for (const row of Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))) {
+    if (!isGradePage()) return
+    for (const row of Array.from(document.querySelectorAll<HTMLElement>(GRADE_ROWS_SELECTOR))) {
       const snapshot = snapshotGradeRow(row)
       if (snapshot && !gradeBaselines.has(snapshot.key)) {
         gradeBaselines.set(snapshot.key, snapshot)
@@ -808,8 +907,17 @@ function createController(): UndoRedoController {
   }
 
   function findGradeRowByKey(key: string): HTMLElement | null {
-    return Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
+    return Array.from(document.querySelectorAll<HTMLElement>(GRADE_ROWS_SELECTOR))
       .find((row) => gradeRowKey(row) === key) ?? null
+  }
+
+  /** True when a request body carries a field that belongs to this grade row. */
+  function bodyHasGradeField(body: Record<string, unknown>, row: HTMLElement | null): boolean {
+    if (!row) return false
+    const snapshot = snapshotGradeRow(row)
+    if (!snapshot) return false
+    const names = new Set(snapshot.fields.map((field) => field.name))
+    return Object.keys(body).some((key) => names.has(key))
   }
 
   function collectGradeIds(value: unknown, out: string[], depth = 0): void {
@@ -829,10 +937,10 @@ function createController(): UndoRedoController {
     const candidates: string[] = []
     collectGradeIds(body, candidates)
     const fallback = lastTouchedGradeRow
-      ?? document.querySelector<HTMLElement>('.evaluation-table tbody tr.tamperina-selected')
+      ?? document.querySelector<HTMLElement>('.tamperina-selected')
     if (!candidates.length) return fallback
 
-    const rows = Array.from(document.querySelectorAll<HTMLElement>('.evaluation-table tbody tr'))
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(GRADE_ROWS_SELECTOR))
     const byKey = rows.find((row) => {
       const key = gradeRowKey(row) ?? ''
       return candidates.some((value) => key.endsWith(`|${value}`))
@@ -869,13 +977,18 @@ function createController(): UndoRedoController {
     after: GradeSnapshot,
     restored?: SerializedAction,
   ): HistoryAction {
+    const gradeArrow = getLocale() === 'en' ? '→' : '←'
     const gradePart = before.grade && after.grade && before.grade !== after.grade
-      ? ` · ${before.grade} ← ${after.grade}`
+      ? ` · ${before.grade} ${gradeArrow} ${after.grade}`
       : ''
     const data: SerializedAction = {
       id: restored?.id ?? nextId(),
-      title: restored?.title ?? `تعديل تقييم ${after.label}`,
-      detail: restored?.detail ?? `من ${before.score ?? '—'} إلى ${after.score ?? '—'}${gradePart}`,
+      title: restored?.title ?? t('core.undo.title.gradeChanged', { p0: after.label }),
+      detail: restored?.detail ?? t('core.undo.detail.gradeChanged', {
+        p0: before.score ?? '—',
+        p1: after.score ?? '—',
+        p2: gradePart,
+      }),
       at: restored?.at ?? Date.now(),
       ...(restored?.warning ? { warning: restored.warning } : {}),
       kind: 'grade',
@@ -887,7 +1000,7 @@ function createController(): UndoRedoController {
     const replay = async (target: GradeSnapshot): Promise<void> => {
       const body = command.body ? patchGradeBody(command.body, target) : undefined
       const response = await send({ ...command, body })
-      if (!isGradeSuccess(response)) throw new Error('لم يؤكد الخادم حفظ التقييم')
+      if (!isGradeSuccess(response)) throw new Error(t('core.undo.error.gradeNotConfirmed'))
       gradeBaselines.set(target.key, target)
       persist()
       applySnapshotToRow(target)
@@ -962,7 +1075,9 @@ function createController(): UndoRedoController {
   }
 
   function installGradeListeners(): void {
-    if (normalisePath(location.pathname) !== '/evaluation') return
+    if (gradeListenersInstalled) return
+    if (!isGradePage()) return
+    gradeListenersInstalled = true
 
     // Capture the value BEFORE the user edits it. A `change` event already
     // carries the new value, so it must never overwrite the saved baseline.
@@ -1029,7 +1144,11 @@ function createController(): UndoRedoController {
       }
 
       const nextWarning = failures.length
-        ? `اكتمل ${actions.length - failures.length} من ${actions.length} — تعذّر: ${failures.slice(0, 3).join('، ')}`
+        ? t('core.undo.warning.batchPartial', {
+          p0: actions.length - failures.length,
+          p1: actions.length,
+          p2: failures.slice(0, 3).join(listSeparator()),
+        })
         : undefined
       return makeBatchAction(resolvedTitle, resolvedDetail, next, nextWarning)
     }
@@ -1116,6 +1235,42 @@ function createController(): UndoRedoController {
     emitAttendance({ type: 'remove', record })
   }
 
+  /**
+   * Exam check-in is observed only to confirm the platform's own scan form.
+   * There is no confirmed delete route for an exam participation, so this
+   * deliberately does not create an undoable attendance action; doing so would
+   * replay DELETE /attendance/{id} against the wrong resource.
+   */
+  function handleExamCheckIn(body: unknown, json: unknown): void {
+    const bodyObj = asObject(body) ?? {}
+    const requestCode = bodyObj.student == null ? '' : String(bodyObj.student).trim()
+    if (!requestCode) return
+
+    const raw = asObject(json)
+    const responseRecord = asRecord(raw?.record)
+    const attendance = asObject(raw?.attendance)
+    const stateRecords = Array.isArray(attendance?.records) ? attendance.records : []
+    const stateRecord = stateRecords.find((item) => {
+      const candidate = asObject(item)
+      return candidate && String(candidate.student_code ?? '').trim() === requestCode
+    })
+    const source = responseRecord ?? asRecord(stateRecord)
+    const student = asObject(source?.student)
+    const profile = asObject(student?.student_profile)
+    const sourceValue = toSource(bodyObj.source)
+
+    const record: LiveRecord = {
+      id: `exam:${String(source?.id ?? source?.record_id ?? requestCode)}`,
+      ...(typeof source?.student_name === 'string' ? { name: source.student_name } : {}),
+      ...(typeof student?.name === 'string' ? { name: student.name } : {}),
+      username: requestCode,
+      studentCode: String(source?.student_code ?? profile?.student_code ?? requestCode),
+      lessonId: null,
+      ...(sourceValue ? { source: sourceValue } : {}),
+    }
+    emitAttendance({ type: raw?.duplicate === true ? 'duplicate' : 'add', record })
+  }
+
   function observeResponse(
     method: string,
     url: URL,
@@ -1140,12 +1295,22 @@ function createController(): UndoRedoController {
 
     if (!enabled) return
 
-    if (normalisePath(location.pathname) === '/evaluation' && method !== 'GET') {
+    if (method === 'POST' && EXAM_CHECKIN_RE.test(url.pathname)) {
+      handleExamCheckIn(body, json)
+      recordObservation(method, url, asObject(body) ?? {}, false, 'exam-checkin')
+      return
+    }
+
+    if (isGradePage() && method !== 'GET') {
       const gradeBody = asObject(body) ?? {}
-      const touchedRow = lastTouchedGradeRow != null
-        || !!document.querySelector('.evaluation-table tbody tr.tamperina-selected')
+      const touchedRow = lastTouchedGradeRow
+        ?? document.querySelector<HTMLElement>('.tamperina-selected')
+      // An unrelated POST (logging, notifications, …) can fire after a grade
+      // row was touched. Only fall back to "grade save" when the body actually
+      // carries a field from that row; otherwise we would record — and later
+      // replay — a bogus action whose command points at the wrong endpoint.
       const isGrade = isGradeRequest(url, gradeBody)
-        || (touchedRow && Object.keys(gradeBody).length > 0)
+        || bodyHasGradeField(gradeBody, touchedRow)
       recordObservation(method, url, gradeBody, isGrade, isGrade ? undefined : 'no-grade-fields')
       if (isGrade) {
         handleGradeChange(method, url, gradeBody, before.headers, json)
@@ -1277,7 +1442,7 @@ function createController(): UndoRedoController {
     if (!enabled || busy) return
     const action = past[past.length - 1]
     if (!action) {
-      toast({ title: 'لا يوجد ما يمكن التراجع عنه', variant: 'warning' })
+      toast({ title: t('core.undo.toast.noUndo'), variant: 'warning' })
       return
     }
 
@@ -1288,16 +1453,16 @@ function createController(): UndoRedoController {
       past.pop()
       future.push(inverse)
       toast({
-        title: 'تم التراجع',
-        description: `أُلغي: ${action.title}`,
+        title: t('core.undo.toast.undone'),
+        description: t('core.undo.toast.undoneDesc', { p0: action.title }),
         variant: 'undo',
       })
       if (inverse.warning) {
-        toast({ title: 'تراجع جزئي', description: inverse.warning, variant: 'warning', duration: 8000 })
+        toast({ title: t('core.undo.toast.partialUndo'), description: inverse.warning, variant: 'warning', duration: 8000 })
       }
     } catch (error) {
       toast({
-        title: 'تعذّر التراجع',
+        title: t('core.undo.toast.undoFailed'),
         description: describeError(error),
         variant: 'error',
       })
@@ -1312,7 +1477,7 @@ function createController(): UndoRedoController {
     if (!enabled || busy) return
     const action = future[future.length - 1]
     if (!action) {
-      toast({ title: 'لا يوجد ما يمكن إعادته', variant: 'warning' })
+      toast({ title: t('core.undo.toast.noRedo'), variant: 'warning' })
       return
     }
 
@@ -1323,16 +1488,16 @@ function createController(): UndoRedoController {
       future.pop()
       past.push(forward)
       toast({
-        title: 'تمت الإعادة',
-        description: `أُعيد: ${action.title}`,
+        title: t('core.undo.toast.redone'),
+        description: t('core.undo.toast.redoneDesc', { p0: action.title }),
         variant: 'redo',
       })
       if (forward.warning) {
-        toast({ title: 'إعادة جزئية', description: forward.warning, variant: 'warning', duration: 8000 })
+        toast({ title: t('core.undo.toast.partialRedo'), description: forward.warning, variant: 'warning', duration: 8000 })
       }
     } catch (error) {
       toast({
-        title: 'تعذّرت الإعادة',
+        title: t('core.undo.toast.redoFailed'),
         description: describeError(error),
         variant: 'error',
       })
@@ -1391,10 +1556,10 @@ function createController(): UndoRedoController {
    * then record exactly one undoable action (or one entry in an open batch).
    */
   async function deleteAttendanceRecord(record: LiveRecord, headers?: Record<string, string>): Promise<void> {
-    if (!record?.id) throw new Error('معرّف سجل الحضور غير موجود')
+    if (!record?.id) throw new Error(t('core.undo.error.recordIdMissing'))
     const requestHeaders = withCsrf(headers)
     const response = await send(deleteCommand(record.id, requestHeaders))
-    if (!isDeleteSuccess(response)) throw new Error('لم يؤكد الخادم حذف سجل الحضور')
+    if (!isDeleteSuccess(response)) throw new Error(t('core.undo.error.deleteNotConfirmed'))
     forgetRecord(record.id)
     recordedAttendanceIds.delete(record.id)
     pushAction(makeRemovedAction(record, requestHeaders))
@@ -1437,8 +1602,8 @@ function createController(): UndoRedoController {
       enabled = value
       saveEnabled(value)
       toast({
-        title: value ? 'التراجع مفعّل' : 'التراجع متوقف',
-        description: value ? 'Ctrl+Z للتراجع و Ctrl+Y للإعادة' : 'لن تُسجَّل عمليات جديدة',
+        title: value ? t('core.undo.toast.enabled') : t('core.undo.toast.disabled'),
+        description: value ? t('core.undo.toast.enabledDesc') : t('core.undo.toast.disabledDesc'),
         variant: value ? 'applied' : 'warning',
       })
       notify()
@@ -1460,7 +1625,7 @@ function createController(): UndoRedoController {
         notify()
         return null
       }
-      const detail = options?.detail ?? `${actions.length} عملية`
+      const detail = options?.detail ?? t('core.undo.detail.batchCount', { p0: actions.length })
       const grouped = makeBatchAction(title, detail, actions)
       past.push(grouped)
       future.length = 0
@@ -1512,7 +1677,6 @@ export function initUndoRedo(): UndoRedoController {
     const existing = page[CONTROLLER_KEY] as UndoRedoController | undefined
     controller = existing?.version === CONTROLLER_VERSION ? existing : createController()
     page[CONTROLLER_KEY] = controller
-    ;(page as Record<string, unknown>).__tamperinaUndoRedoDebug = () => controller!.debug()
   }
   return controller
 }

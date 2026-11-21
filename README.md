@@ -8,9 +8,15 @@ A single userscript for the Ahmed Zakaria platform: pixel-mascot launcher, setti
 
 **M1 — Undo/Redo.** The mascot shell is ready and the first real toggle is live. On `/attendance/scan`, Tamperina records attendance adds/removes; on `/evaluation`, it records a student's grading change and can restore the last saved score/grade. Both work with `Ctrl+Z` / `Ctrl+Y` (plus `Ctrl+Shift+Z`). On attendance, the shortcuts also fire while a search/input field is focused.
 
-**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, export, evaluation placeholder). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. **تصدير أكواد الحضور** lists the attended students cached for the current lesson as `student code, name` (one per line), with copy and UTF-8 `.txt` download buttons. **إزالة كل حضور الحصة** loads the live attendance list for a lesson, previews it, then deletes every record as one undoable batch (arm before running; `Ctrl+Z` restores them all). The full plan lives in `dev/PLAN.md` (gitignored).
+**M2 — Bulk actions.** The **الجماعي** tab shows bulk action items (attendance, export, evaluation, removal). **تسجيل حضور جماعي** works on `/attendance/scan`: paste student codes or names (one per line), analyze/preview, resolve any ambiguous or not-found names (choose, edit, or drop), then arm and run. It drives the page's existing scan form in a loop — no native bulk endpoint and no voice widget. A completed run is recorded as **one batch** so `Ctrl+Z` can undo all created records together. **تصدير أكواد الحضور** lists the attended students cached for the current lesson as `student code, name` (one per line), with copy and UTF-8 `.txt` download buttons. **إزالة كل حضور الحصة** loads the live attendance list for a lesson, previews it, then deletes every record as one undoable batch (arm before running; `Ctrl+Z` restores them all). **تقييم جماعي** works on `/evaluation`: paste `code, exam, homework` lines, preview and resolve ambiguous students, then arm and run to apply grades through the page's own controls as one undoable batch. The full plan lives in `dev/PLAN.md` (gitignored).
 
 **M3 — Evaluation tools.** Three new independent switches in **المفاتيح**, active on `/evaluation`: select a student and grade them with hotkeys, a Firefox-style find bar on `Ctrl+Alt+F` (4-digit ID auto-selects a student), and glowy homework-grade buttons. All of them set the page's own controls and dispatch `change`, so the platform's auto-save and Tamperina's undo/redo keep working.
+
+**M4 — Exam tools.** Three more persisted switches, all off by default. **لوحة حضور الامتحان القابلة للتعديل** is available on every page and reveals an editable stage table on any `/comprehensive-exams/<id>` page: add/remove rows for any student code, include/exclude, payment status, amount, payment note, and check-in source. Edits disarm the run; Confirm still submits through the platform's own `#examScan` form. **إيقاف رسائل واتساب حتى الموافقة** stops the WhatsApp worker and shows an in-page notice inside the exam work area on `/comprehensive-exams/*`; Tamperina only resumes a worker it stopped itself. **الأوامر الجماعية عن بُعد** is a mode toggle: when on, the four bulk run actions (attendance, evaluation, exam attendance, exam grading) execute in a target tab and can be launched from any page; when off, each action is only available on its own page. It is not a separate menu action. The target tab still runs the shared preview → arm → run pipeline and keeps its undo history; exam actions accept any student and any exam, matched by the exam ID in the target URL.
+
+## Language
+
+Tamperina's UI defaults to Arabic to match the Arabic-only host platform. An **English mode** switch in the toggles panel (`المفاتيح` / `Toggles`) flips Tamperina's own labels — including the Tampermonkey menu commands — to English with names aligned to the code identifiers, for developer convenience. The choice is persisted in `GM_setValue` and the shadow layout switches to LTR. Host-page data (grade keys, status words, hotkey characters, CSS selectors, example inputs) stays Arabic in both modes so the script keeps working against the real site. Tamperina-owned UI strings live in `src/core/i18n/`; add new keys there rather than hardcoding text. Domain data that must keep matching the Arabic site (grade keys, parser status words, hotkey characters, CSS selectors, example inputs) intentionally stays in code.
 
 ## Build
 
@@ -19,13 +25,13 @@ npm install
 npm run build
 ```
 
-Run `npm run check` to typecheck, build both production and DEV scripts, and syntax-check the generated artifacts — the same sequence CI uses.
+Run `npm test` for the Vitest suite (pure guards, parsers, persisted-state validation, cross-tab protocol, and UI helpers), or `npm run check` to typecheck, run the tests, build both production and DEV scripts, syntax-check the generated artifacts, and verify i18n integrity (`scripts/check-i18n.mjs`) — the same sequence CI uses.
 
 Output: `dist/tamperina.user.js` — a single self-contained file. The mascot from `public/rina/logo.png` is inlined as a data URL at build time, so swap in your optimized PNG there and rebuild. The build trims transparent padding automatically (the original PNG has a lot of empty space around the head) and encodes every image in `public/rina/` as high-quality WebP with full alpha; your source files are never modified. Drop in a new Rina image (for example `applied.png`) and it becomes available as a toast sticker automatically. The Cairo variable font (Arabic, Latin and Latin-ext subsets in `public/fonts/`) is also inlined and injected into `document.head`, so Arabic text renders in Cairo inside the Shadow DOM without depending on the host page.
 
 ## CI/CD
 
-Pushing a source change to `main` runs `.github/workflows/ci.yml`. It typechecks, builds both userscripts, syntax-checks them, and commits `dist/` back to `main` with `[skip ci]` so Tampermonkey's update URL always points at a fresh artifact. No manual upload is needed.
+Pushing a source change to `main` runs `.github/workflows/ci.yml`. It typechecks, runs the tests, builds both userscripts, syntax-checks them, verifies i18n catalog parity, and commits `dist/` back to `main` with `[skip ci]` so Tampermonkey's update URL always points at a fresh artifact. No manual upload is needed.
 
 If the generated script changes and `package.json` still has the old version, CI bumps the patch version automatically. Bump it yourself first when you want a minor or major release.
 
@@ -86,7 +92,7 @@ Digits and `.` type into the selected student's **exam score** (`7.5` works, Ara
 
 ### Bulk actions
 
-Open **الجماعي** to see available bulk actions. **تقييم جماعي** and additional actions are placeholders for later.
+Open **الجماعي** to see the available bulk actions: **تسجيل حضور جماعي** (attendance), **تقييم جماعي** (exam/homework grades), **تصدير أكواد الحضور** (export attendee codes), and **إزالة كل حضور الحصة** (remove all attendance for a lesson). Every write action follows the same safety path: preview the parsed data, explicitly arm execution, then run; each row is logged and the whole batch can be undone with Ctrl+Z.
 
 #### تسجيل حضور جماعي
 

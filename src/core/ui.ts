@@ -1,7 +1,18 @@
-import { GM_registerMenuCommand, unsafeWindow } from '$'
+import {
+  GM_addValueChangeListener,
+  GM_getValue,
+  GM_registerMenuCommand,
+  GM_setValue,
+  GM_unregisterMenuCommand,
+  unsafeWindow,
+} from '$'
 import rina from 'virtual:tamperina-rina'
 import cairoFontCss from 'virtual:tamperina-fonts'
 import shellStyle from '../ui/styles.css?style'
+import { escapeHtml } from '../ui/dom'
+import { installKeyShield, isEditableTarget, isGlobalShortcutKey } from '../ui/keyShield'
+import { ensureHoldPanel, placeHoldNotice, setPagePanelText } from '../ui/pagePanels'
+import { renderExamStageReview, renderExamStageTable, type ExamStageLabels, type ExamStageRowView } from '../ui/examStageTable'
 import { icons } from '../icons'
 import { attachToaster, toast } from './toast'
 import { getUndoRedoController, type LiveRecord, type UndoRedoController } from './undoRedo'
@@ -20,14 +31,43 @@ import {
 } from './evaluation'
 import { mountFindBar } from './findBar'
 import {
+  bulkKindMatchesPath,
+  isBulkRunKind,
+  remoteInputAllowed,
+  remoteTargetMatches,
+  supportedBulkKinds,
+  type BulkRunKind,
+} from './pageGuards'
+import {
+  examEvalCodesAllowed,
+  examIdFromPath,
+  examTargetAllowed,
+  isComprehensiveExamsPath,
+  isExamBulkKind,
+  isExamPagePath,
+} from './examGuards'
+import {
+  initRemoteBulk,
+  REQUEST_TIMEOUT_MESSAGE,
+  REQUEST_TIMEOUT_MS,
+  type RemoteBulkBridge,
+  type RemoteBulkKind,
+  type RemoteBulkPhase,
+  type RemotePreview,
+  type RemoteRequest,
+  type RemoteTarget,
+} from './remoteBulk'
+import {
   currentLessonIdFromPage,
   detectScanForm,
   formatBulkDiagnosticReport,
   formatCandidate,
+  normalizeStudentCode,
   parseBulkEntries,
   resolveNameEntry,
   runBulkAttendance,
   type BulkRowResult,
+  type ExamCheckinOptions,
   type NameRow,
   type ParseEntriesResult,
   type PaymentMode,
@@ -51,17 +91,38 @@ import {
 import {
   loadShell,
   saveShell,
+  SHELL_KEY,
   SIZE_MIN,
   SIZE_MAX,
   SIZE_STEP,
   type ShellState,
 } from './storage'
+import { applyTranslations, getLocale, listSeparator, setLocale, subscribeLocale, t } from './i18n'
 
 const HOST_ID = 'tamperina-root'
 const DRAG_THRESHOLD = 5
 const HOTKEY_RESTORE = 'Alt+Shift+T'
 let cairoFontReady = false
 let toggleEffectsReady = false
+/** The two new cards animate in once, not on every undo-history re-render. */
+let featureCardsIntroduced = false
+
+/** localStorage throws in privacy modes / sandboxed frames — treat as unavailable. */
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function writeFlag(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, String(value))
+  } catch {
+    // Storage may be unavailable; the class toggle still applies for this load.
+  }
+}
 
 function ensureToggleEffectsStyle(): void {
   if (toggleEffectsReady || document.getElementById('tamperina-toggle-effects')) {
@@ -103,6 +164,53 @@ function ensureToggleEffectsStyle(): void {
 .barcode-hidden a[aria-label*="باركود" i] {
   display: none !important;
 }
+
+#tamperina-whatsapp-hold {
+  /* In-page notice: inserted into the exam work panel, so it scrolls with
+     the platform instead of floating over it. */
+  position: relative;
+  inset: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(242, 206, 170, 0.4);
+  border-radius: 14px;
+  background: rgba(36, 24, 16, 0.96);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+  color: #f8efe7;
+  font: 13px/1.6 Cairo, Tajawal, Tahoma, Arial, sans-serif;
+  direction: rtl;
+  animation: tamperina-hold-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes tamperina-hold-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #tamperina-whatsapp-hold { animation: none; }
+}
+#tamperina-whatsapp-hold[hidden] { display: none !important; }
+#tamperina-whatsapp-hold[data-locale='en'] { direction: ltr; }
+#tamperina-whatsapp-hold > span { flex: 1; min-width: 0; }
+#tamperina-whatsapp-hold strong { display: block; font-size: 12px; font-weight: 800; }
+#tamperina-whatsapp-hold small { display: block; margin-top: 2px; font-size: 11px; color: #b9a28f; }
+#tamperina-whatsapp-hold button {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border: 1px solid #f2ceaa;
+  border-radius: 10px;
+  background: #f2ceaa;
+  color: #2a1608;
+  font: 800 12px Cairo, Tajawal, Tahoma, Arial, sans-serif;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+#tamperina-whatsapp-hold button:hover { background: #ffe0bd; transform: translateY(-1px); }
+#tamperina-whatsapp-hold button:disabled { opacity: 0.5; cursor: default; transform: none; }
 `
   ;(document.head || document.documentElement).appendChild(style)
 }
@@ -115,18 +223,9 @@ function snapSize(value: number): number {
   return clamp(Math.round(value / SIZE_STEP) * SIZE_STEP, SIZE_MIN, SIZE_MAX)
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[char] ?? char)
-}
 
 function formatTime(timestamp: number): string {
-  return new Intl.DateTimeFormat('ar', { hour: '2-digit', minute: '2-digit' }).format(timestamp)
+  return new Intl.DateTimeFormat(getLocale(), { hour: '2-digit', minute: '2-digit' }).format(timestamp)
 }
 
 function isAttendancePage(): boolean {
@@ -135,34 +234,12 @@ function isAttendancePage(): boolean {
 
 function featureScopeLabel(): string {
   return location.pathname.replace(/\/$/, '') === '/evaluation'
-    ? 'تقييم الحصة'
-    : 'حضور الطلاب'
+    ? t('ui.feature.scope.evaluation')
+    : t('ui.feature.scope.attendance')
 }
 
-function isEditableTarget(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null
-  if (!el) return false
-  if (el.isContentEditable) return true
-  const tag = el.tagName
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-}
-
-/**
- * Shortcuts that must still reach the document-level handlers when pressed
- * inside Tamperina's modal. Everything else is contained in the shadow tree so
- * the platform's scanner handler cannot mistake it for untargeted keypresses.
- */
-function isGlobalShortcutKey(event: Event): boolean {
-  if (!('key' in event)) return false
-  const keyEvent = event as KeyboardEvent
-  if (keyEvent.key === 'Escape') return true
-  if (keyEvent.altKey && keyEvent.shiftKey && keyEvent.code === 'KeyT') return true
-  if (keyEvent.ctrlKey && keyEvent.altKey && keyEvent.code === 'KeyF') return true
-  if ((keyEvent.ctrlKey || keyEvent.metaKey) && !keyEvent.altKey) {
-    return keyEvent.code === 'KeyZ' || keyEvent.code === 'KeyY'
-  }
-  return false
-}
+// Install before the platform registers its document-level scanner handlers.
+installKeyShield(HOST_ID)
 
 /**
  * Register the bundled font bytes directly instead of using data URL
@@ -200,8 +277,14 @@ export function mountShell(): void {
   ensureToggleEffectsStyle()
   if (document.getElementById(HOST_ID)) return
 
+  // The locale must be active before the first markup is built: inline t()
+  // calls in the templates render immediately.
+  const state: ShellState = loadShell()
+  setLocale(state.locale)
+
   const host = document.createElement('div')
   host.id = HOST_ID
+  host.dir = state.locale === 'en' ? 'ltr' : 'rtl'
   document.documentElement.appendChild(host)
 
   const shadow = host.attachShadow({ mode: 'open' })
@@ -211,28 +294,28 @@ export function mountShell(): void {
   const shellEl = document.createElement('div')
   shellEl.className = 'shell'
   shellEl.innerHTML = `
-    <div class="launcher" title="Tamperina" tabindex="0" role="button" aria-label="فتح تمبرينا">
+    <div class="launcher" title="Tamperina" tabindex="0" role="button" data-i18n-aria="ui.launcher.open">
       <div class="flip">
         <div class="spin">
           <img class="mascot" src="${rina.logo}" alt="Tamperina" draggable="false" />
         </div>
       </div>
-      <div class="pill" role="toolbar" aria-label="أدوات تمبرينا">
-        <button type="button" data-act="shrink" title="تصغير الحجم">${icons.shrink}</button>
-        <button type="button" data-act="grow" title="تكبير الحجم">${icons.grow}</button>
+      <div class="pill" role="toolbar" data-i18n-aria="ui.pill.aria">
+        <button type="button" data-act="shrink" data-i18n-title="ui.pill.shrink">${icons.shrink}</button>
+        <button type="button" data-act="grow" data-i18n-title="ui.pill.grow">${icons.grow}</button>
         <span class="sep" aria-hidden="true"></span>
-        <button type="button" data-act="mirror" title="عكس الصورة">${icons.flip}</button>
-        <button type="button" data-act="pause" title="إيقاف الحركة">${icons.pause}</button>
-        <span class="frames" role="group" aria-label="إطار الحركة" hidden>
-          <button type="button" data-act="frame" data-frame="1" title="الإطار 1 — مائل لليمين (+10°)">F1</button>
-          <button type="button" data-act="frame" data-frame="2" title="الإطار 2 — مائل لليسار (−10°)">F2</button>
-          <button type="button" data-act="frame" data-frame="3" title="الوضع المستقيم (0°)">F3</button>
+        <button type="button" data-act="mirror" data-i18n-title="ui.pill.mirror">${icons.flip}</button>
+        <button type="button" data-act="pause" data-i18n-title="ui.pill.pause">${icons.pause}</button>
+        <span class="frames" role="group" data-i18n-aria="ui.pill.frames.aria" hidden>
+          <button type="button" data-act="frame" data-frame="1" data-i18n-title="ui.pill.frame1">F1</button>
+          <button type="button" data-act="frame" data-frame="2" data-i18n-title="ui.pill.frame2">F2</button>
+          <button type="button" data-act="frame" data-frame="3" data-i18n-title="ui.pill.frame3">F3</button>
         </span>
-        <button type="button" data-act="lock" title="تثبيت الموضع">${icons.lockOpen}</button>
-        <button type="button" data-act="clickThrough" title="النقر من خلال">${icons.clickThrough}</button>
+        <button type="button" data-act="lock" data-i18n-title="ui.pill.lock">${icons.lockOpen}</button>
+        <button type="button" data-act="clickThrough" data-i18n-title="ui.pill.clickThrough">${icons.clickThrough}</button>
       </div>
     </div>
-    <button type="button" class="pin" title="${HOTKEY_RESTORE} — استعادة تمبرينا">${icons.pin}</button>
+    <button type="button" class="pin" title="${t('ui.pin.title', { p0: HOTKEY_RESTORE })}">${icons.pin}</button>
   `
   shadow.appendChild(shellEl)
 
@@ -240,165 +323,198 @@ export function mountShell(): void {
   backdrop.className = 'backdrop'
   backdrop.hidden = true
   backdrop.innerHTML = `
-    <div class="modal" role="dialog" aria-modal="true" aria-label="خيارات تمبرينا">
-      <div class="modal-head">
-        <div class="brand">
-          <span class="brand-dot"></span>
-          <span>
-            <strong>تَمبــرينا</strong>
-            <small>مساعدة المساعدين</small>
-          </span>
+    <div class="modal" role="dialog" aria-modal="true" data-i18n-aria="ui.modal.aria">
+      <div class="modal-top">
+        <div class="modal-head">
+          <div class="brand">
+            <span class="brand-dot"></span>
+            <span>
+              <strong data-i18n="ui.modal.brand"></strong>
+              <small data-i18n="ui.modal.subtitle"></small>
+            </span>
+          </div>
+          <button type="button" class="icon-btn" data-close data-i18n-title="ui.modal.close">${icons.close}</button>
         </div>
-        <button type="button" class="icon-btn" data-close title="إغلاق">${icons.close}</button>
-      </div>
-      <div class="tabs" role="tablist">
-        <span class="tab-indicator" aria-hidden="true"></span>
-        <button type="button" class="tab" data-tab="toggles" role="tab">${icons.toggles} المفاتيح</button>
-        <button type="button" class="tab" data-tab="bulk" role="tab">${icons.bulk} الجماعي</button>
+        <div class="tabs" role="tablist" data-i18n-aria="ui.tabs.aria">
+          <span class="tab-indicator" aria-hidden="true"></span>
+          <button type="button" class="tab" data-tab="toggles" role="tab" id="tamperina-tab-toggles" aria-controls="tamperina-panel-toggles" data-i18n-aria="ui.tab.toggles">${icons.toggles} <span data-i18n="ui.tab.toggles"></span></button>
+          <button type="button" class="tab" data-tab="bulk" role="tab" id="tamperina-tab-bulk" aria-controls="tamperina-panel-bulk" data-i18n-aria="ui.tab.bulk">${icons.bulk} <span data-i18n="ui.tab.bulk"></span></button>
+        </div>
       </div>
       <div class="panels">
-        <div data-panel="toggles">
+        <div data-panel="toggles" role="tabpanel" id="tamperina-panel-toggles" aria-labelledby="tamperina-tab-toggles">
           <div data-feature-list class="feature-list"></div>
         </div>
-        <div data-panel="bulk" hidden>
+        <div data-panel="bulk" role="tabpanel" id="tamperina-panel-bulk" aria-labelledby="tamperina-tab-bulk" hidden>
           <div class="bulk-menu" data-bulk-view="menu">
+            <p class="bulk-note bulk-mode-hint" data-bulk-mode-hint hidden></p>
             <div class="bulk-menu-list">
-              <button type="button" class="bulk-item" data-bulk-open="attendance">
+              <button type="button" class="bulk-item" data-bulk-open="attendance" data-bulk-kind="attendance">
                 <span class="feature-icon">${icons.bulk}</span>
                 <span class="bulk-item-text">
-                  <strong>تسجيل حضور جماعي</strong>
-                  <small>إدخال قائمة طلاب في صفحة الحضور مع معاينة وتسليح وتراجع دفعة واحدة</small>
+                  <strong data-i18n="ui.bulk.menu.attendance.title"></strong>
+                  <small data-i18n="ui.bulk.menu.attendance.desc"></small>
                 </span>
-                <span class="feature-badge on">متاح</span>
+                <span class="feature-badge on" data-bulk-availability></span>
               </button>
 
-              <button type="button" class="bulk-item" data-bulk-open="evaluation">
+              <button type="button" class="bulk-item" data-bulk-open="evaluation" data-bulk-kind="evaluation">
                 <span class="feature-icon">${icons.toggles}</span>
                 <span class="bulk-item-text">
-                  <strong>تقييم جماعي</strong>
-                  <small>إدخال درجات امتحان/واجب لعدة طلاب في صفحة التقييم مع معاينة وتسليح وتراجع دفعة واحدة</small>
+                  <strong data-i18n="ui.bulk.menu.evaluation.title"></strong>
+                  <small data-i18n="ui.bulk.menu.evaluation.desc"></small>
                 </span>
-                <span class="feature-badge on">متاح</span>
+                <span class="feature-badge on" data-bulk-availability></span>
               </button>
 
-              <button type="button" class="bulk-item" data-bulk-open="export">
+              <button type="button" class="bulk-item" data-bulk-open="exam-attendance" data-bulk-kind="exam-attendance">
+                <span class="feature-icon">${icons.bulk}</span>
+                <span class="bulk-item-text">
+                  <strong data-i18n="ui.bulk.menu.examAttendance.title"></strong>
+                  <small data-i18n="ui.bulk.menu.examAttendance.desc"></small>
+                </span>
+                <span class="feature-badge on" data-bulk-availability></span>
+              </button>
+
+              <button type="button" class="bulk-item" data-bulk-open="exam-evaluation" data-bulk-kind="exam-evaluation">
+                <span class="feature-icon">${icons.toggles}</span>
+                <span class="bulk-item-text">
+                  <strong data-i18n="ui.bulk.menu.examEvaluation.title"></strong>
+                  <small data-i18n="ui.bulk.menu.examEvaluation.desc"></small>
+                </span>
+                <span class="feature-badge on" data-bulk-availability></span>
+              </button>
+
+              <button type="button" class="bulk-item" data-bulk-open="export" data-bulk-local>
                 <span class="feature-icon">${icons.download}</span>
                 <span class="bulk-item-text">
-                  <strong>تصدير أكواد الحضور</strong>
-                  <small>الطلاب الحاضرون في الحصة: الكود والاسم — نسخ أو تنزيل ملف txt</small>
+                  <strong data-i18n="ui.bulk.menu.export.title"></strong>
+                  <small data-i18n="ui.bulk.menu.export.desc"></small>
                 </span>
-                <span class="feature-badge on">متاح</span>
+                <span class="feature-badge on" data-bulk-availability></span>
               </button>
 
-              <button type="button" class="bulk-item" data-bulk-open="remove">
+              <button type="button" class="bulk-item" data-bulk-open="remove" data-bulk-local>
                 <span class="feature-icon">${icons.trash}</span>
                 <span class="bulk-item-text">
-                  <strong>إزالة كل حضور الحصة</strong>
-                  <small>حذف جميع سجلات الحاضرين في الحصة دفعة واحدة قابلة للتراجع</small>
+                  <strong data-i18n="ui.bulk.menu.remove.title"></strong>
+                  <small data-i18n="ui.bulk.menu.remove.desc"></small>
                 </span>
-                <span class="feature-badge on">متاح</span>
+                <span class="feature-badge on" data-bulk-availability></span>
               </button>
             </div>
           </div>
 
           <div class="bulk-detail" data-bulk-view="attendance" hidden>
-            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <button type="button" class="bulk-back" data-bulk-back><span data-i18n="ui.bulk.back"></span></button>
             <div class="bulk-card" data-bulk-root>
               <div class="bulk-head">
                 <span class="feature-icon">${icons.bulk}</span>
                 <span class="feature-titles">
-                  <strong>تسجيل حضور جماعي</strong>
-                  <small>إدخال عبر نموذج الحضور (أكواد أو أسماء)</small>
+                  <strong data-bulk-head-title></strong>
+                  <small data-bulk-head-subtitle></small>
                 </span>
-                <span class="feature-badge off" data-bulk-state-badge>جاهز</span>
+                <span class="feature-badge off" data-bulk-state-badge data-i18n="ui.common.ready"></span>
               </div>
 
               <p class="bulk-note">
-                اكتب كل طالب في سطر مستقل: كود الطالب أو اسمه. إذا تعذّر العثور على الاسم أو كان غامضًا/مشتركًا، ستظهر لك خيارات: اختيار الطالب الصحيح، تعديل الاسم، أو تجاهله لإدخاله يدويًا.
+                <span data-bulk-head-note></span>
               </p>
 
               <div class="bulk-grid">
                 <label class="bulk-field">
-                  <span>رقم الحصة (الحالية افتراضيًا)</span>
-                  <input type="text" inputmode="numeric" class="bulk-input" data-bulk-lesson placeholder="مثال: 293" />
+                  <span data-i18n="ui.common.lessonLabel"></span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-bulk-lesson data-i18n-placeholder="ui.common.lessonPlaceholder" />
                 </label>
                 <div class="bulk-field">
-                  <span>نوع الحصة</span>
-                  <div class="bulk-mode-toggle" data-bulk-mode-toggle role="group" aria-label="نوع الحصة">
-                    <button type="button" class="bulk-mode-btn active" data-mode="center" aria-pressed="true">${icons.center}<span>سنتر</span></button>
-                    <button type="button" class="bulk-mode-btn" data-mode="school" aria-pressed="false">${icons.school}<span>مدرسة</span></button>
+                  <span data-i18n="ui.bulk.attendance.modeLabel"></span>
+                  <div class="bulk-mode-toggle" data-bulk-mode-toggle role="group" data-i18n-aria="ui.bulk.attendance.modeLabel">
+                    <button type="button" class="bulk-mode-btn active" data-mode="center" aria-pressed="true">${icons.center}<span data-i18n="ui.bulk.attendance.modeCenter"></span></button>
+                    <button type="button" class="bulk-mode-btn" data-mode="school" aria-pressed="false">${icons.school}<span data-i18n="ui.bulk.attendance.modeSchool"></span></button>
                   </div>
                 </div>
               </div>
 
               <label class="bulk-field">
-                <span>قائمة الطلاب (كود أو اسم في كل سطر)</span>
-                <textarea class="bulk-textarea" data-bulk-codes rows="7" placeholder="2349&#10;أحمد محمد&#10;2351"></textarea>
+                <span data-i18n="ui.bulk.attendance.studentsLabel"></span>
+                <textarea class="bulk-textarea" data-bulk-codes rows="7" data-i18n-placeholder="ui.bulk.attendance.inputPlaceholder"></textarea>
               </label>
 
-              <div class="bulk-actions">
-                <button type="button" class="action-btn" data-bulk-preview>${icons.toggles}<span>معاينة وتحليل</span></button>
-                <button type="button" class="action-btn" data-bulk-arm disabled>${icons.lock}<span>تسليح التنفيذ</span></button>
-                <button type="button" class="action-btn bulk-run" data-bulk-run disabled>${icons.play}<span>تنفيذ</span></button>
-                <button type="button" class="action-btn bulk-stop" data-bulk-stop disabled>${icons.pause}<span>إيقاف</span></button>
+              <div class="bulk-stage" data-exam-stage hidden>
+                <div class="bulk-stage-head">
+                  <span class="feature-titles">
+                    <strong data-i18n="ui.bulk.exam.stage.title"></strong>
+                    <small data-i18n="ui.bulk.exam.stage.note"></small>
+                  </span>
+                  <button type="button" class="bulk-mini-btn" data-exam-stage-add data-i18n="ui.bulk.exam.stage.add"></button>
+                </div>
+                <div class="bulk-stage-table" data-exam-stage-table></div>
               </div>
 
-              <div class="bulk-preview" data-bulk-preview-box>لم تتم المعاينة بعد.</div>
+              <div class="bulk-actions">
+                <button type="button" class="action-btn" data-bulk-preview>${icons.toggles}<span data-i18n="ui.common.previewAnalyze"></span></button>
+                <button type="button" class="action-btn" data-bulk-arm disabled>${icons.lock}<span data-i18n="ui.common.armExecution"></span></button>
+                <button type="button" class="action-btn bulk-run" data-bulk-run disabled>${icons.play}<span data-i18n="ui.common.run"></span></button>
+                <button type="button" class="action-btn bulk-stop" data-bulk-stop disabled>${icons.pause}<span data-i18n="ui.common.stop"></span></button>
+              </div>
+
+              <div class="bulk-preview" data-bulk-preview-box data-i18n="ui.common.previewEmpty"></div>
               <div class="bulk-resolve" data-bulk-resolve hidden></div>
 
               <div class="history-head">
                 ${icons.history}
-                <strong>سجل التنفيذ</strong>
+                <strong data-i18n="ui.common.historyTitle"></strong>
                 <small data-bulk-log-count>0</small>
               </div>
               <div class="bulk-log" data-bulk-log>
-                <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+                <div class="history-empty" data-i18n="ui.common.logEmpty"></div>
               </div>
 
               <div class="bulk-diagnostics" data-bulk-diagnostics hidden>
                 <div class="bulk-undecided-head">
                   <div class="bulk-undecided-title">
-                    <strong>تقرير التشخيص</strong>
+                    <strong data-i18n="ui.bulk.attendance.diagnosticsTitle"></strong>
                     <span class="feature-badge busy" data-bulk-debug-count>0</span>
                   </div>
                   <div class="bulk-resolve-actions">
-                    <button type="button" class="bulk-mini-btn" data-bulk-copy-debug>نسخ التقرير</button>
-                    <button type="button" class="bulk-mini-btn" data-bulk-copy-failed>نسخ الأكواد الفاشلة</button>
-                    <button type="button" class="bulk-mini-btn" data-bulk-copy-skipped>نسخ المتخطين</button>
+                    <button type="button" class="bulk-mini-btn" data-bulk-copy-debug data-i18n="ui.bulk.attendance.copyReport"></button>
+                    <button type="button" class="bulk-mini-btn" data-bulk-copy-failed data-i18n="ui.bulk.attendance.copyFailed"></button>
+                    <button type="button" class="bulk-mini-btn" data-bulk-copy-skipped data-i18n="ui.bulk.attendance.copySkipped"></button>
+                    <button type="button" class="bulk-mini-btn" data-bulk-retry disabled data-i18n="ui.bulk.attendance.retryFailed"></button>
                   </div>
                 </div>
                 <pre class="bulk-debug-text" data-bulk-debug-text></pre>
               </div>
 
               <p class="feature-note">${icons.shieldAlert}
-                يتم الإرسال طالبًا بطالب عبر نموذج الصفحة نفسه. التراجع بعد اكتمال الدفعة يلغي كل السجلات المُنشأة في خطوة واحدة. إذا اختلف رقم الحصة عن الحصة المفتوحة، يجب فتح الرابط الصحيح أولًا.
+                <span data-i18n="ui.bulk.attendance.footerNote"></span>
               </p>
             </div>
           </div>
 
           <div class="bulk-detail" data-bulk-view="export" hidden>
-            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <button type="button" class="bulk-back" data-bulk-back><span data-i18n="ui.bulk.back"></span></button>
             <div class="bulk-card" data-export-root>
               <div class="bulk-head">
                 <span class="feature-icon">${icons.download}</span>
                 <span class="feature-titles">
-                  <strong>تصدير أكواد الحضور</strong>
-                  <small>قائمة الحاضرين في الحصة الحالية</small>
+                  <strong data-i18n="ui.bulk.menu.export.title"></strong>
+                  <small data-i18n="ui.bulk.export.subtitle"></small>
                 </span>
-                <span class="feature-badge off" data-export-count>0 طالب</span>
+                <span class="feature-badge off" data-export-count>${t('ui.bulk.export.count', { p0: 0 })}</span>
               </div>
 
               <p class="bulk-note">
-                كل سطر في الصيغة: كود الطالب، الاسم. الكود هو المعرّف المستخدم في تسجيل الحضور الجماعي. يمكن نسخ القائمة أو تنزيلها كملف نصي.
+                <span data-i18n="ui.bulk.export.note"></span>
               </p>
 
               <div class="bulk-grid">
                 <label class="bulk-field">
-                  <span>رقم الحصة (الحالية افتراضيًا)</span>
-                  <input type="text" inputmode="numeric" class="bulk-input" data-export-lesson placeholder="مثال: 293" />
+                  <span data-i18n="ui.common.lessonLabel"></span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-export-lesson data-i18n-placeholder="ui.common.lessonPlaceholder" />
                 </label>
                 <div class="bulk-field">
-                  <span>السجلات المحفوظة</span>
+                  <span data-i18n="ui.bulk.export.savedLabel"></span>
                   <div class="bulk-mode-toggle" data-export-summary>
                     <span class="bulk-export-summary" data-export-summary-text>—</span>
                   </div>
@@ -406,116 +522,160 @@ export function mountShell(): void {
               </div>
 
               <div class="bulk-actions export-actions">
-                <button type="button" class="action-btn" data-export-refresh>${icons.refresh}<span>تحديث القائمة</span></button>
-                <button type="button" class="action-btn" data-export-copy>${icons.copy}<span>نسخ</span></button>
-                <button type="button" class="action-btn bulk-run" data-export-download>${icons.download}<span>تنزيل txt</span></button>
+                <button type="button" class="action-btn" data-export-refresh>${icons.refresh}<span data-i18n="ui.common.refresh"></span></button>
+                <button type="button" class="action-btn" data-export-copy>${icons.copy}<span data-i18n="ui.common.copy"></span></button>
+                <button type="button" class="action-btn bulk-run" data-export-download>${icons.download}<span data-i18n="ui.bulk.export.download"></span></button>
               </div>
 
               <label class="bulk-field">
-                <span>النتيجة (كود الطالب, الاسم)</span>
-                <textarea class="bulk-textarea bulk-export-text" data-export-text rows="10" placeholder="2349, أحمد محمد"></textarea>
+                <span data-i18n="ui.bulk.export.resultLabel"></span>
+                <textarea class="bulk-textarea bulk-export-text" data-export-text rows="10" data-i18n-placeholder="ui.bulk.export.resultPlaceholder"></textarea>
               </label>
 
               <p class="feature-note" data-export-hint>${icons.shieldAlert}
-                تُبنى القائمة من سجلات الحضور التي رصدها Tamperina في هذه الجلسة. إذا كانت فارغة، افتح صفحة الحضور وانتظر تحميل القائمة ثم اضغط تحديث.
+                <span data-i18n="ui.bulk.export.hint"></span>
               </p>
             </div>
           </div>
 
           <div class="bulk-detail" data-bulk-view="remove" hidden>
-            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <button type="button" class="bulk-back" data-bulk-back><span data-i18n="ui.bulk.back"></span></button>
             <div class="bulk-card" data-remove-root>
               <div class="bulk-head">
                 <span class="feature-icon">${icons.trash}</span>
                 <span class="feature-titles">
-                  <strong>إزالة كل حضور الحصة</strong>
-                  <small>حذف دفعة واحدة لكل سجلات الحاضرين</small>
+                  <strong data-i18n="ui.bulk.menu.remove.title"></strong>
+                  <small data-i18n="ui.bulk.remove.subtitle"></small>
                 </span>
-                <span class="feature-badge off" data-remove-badge>جاهز</span>
+                <span class="feature-badge off" data-remove-badge data-i18n="ui.common.ready"></span>
               </div>
 
               <p class="bulk-note">
-                تُحمَّل الآن قائمة الطلاب المسجّلين حاضرين في رقم الحصة المحدد. بعد المعاينة، فعّل التسليح ثم اضغط حذف الكل. تُحذف السجلات واحدًا تلو الآخر وتُسجَّل كدفعة واحدة يمكن إلغاؤها بـ Ctrl+Z.
+                <span data-i18n="ui.bulk.remove.note"></span>
               </p>
-              <div class="bulk-warn">هذا الإجراء يحذف سجلات الحضور الفعلية في الحصة المحددة. تأكد من رقم الحصة قبل التنفيذ — خصوصًا إذا كان التسجيل السابق قد أضاف جزءًا فقط من الطلاب.</div>
+              <div class="bulk-warn" data-i18n="ui.bulk.remove.warn"></div>
 
               <div class="bulk-grid">
                 <label class="bulk-field">
-                  <span>رقم الحصة (الحالية افتراضيًا)</span>
-                  <input type="text" inputmode="numeric" class="bulk-input" data-remove-lesson placeholder="مثال: 299" />
+                  <span data-i18n="ui.common.lessonLabel"></span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-remove-lesson data-i18n-placeholder="ui.common.lessonPlaceholder" />
                 </label>
                 <div class="bulk-field">
-                  <span>السجلات المراد حذفها</span>
+                  <span data-i18n="ui.bulk.remove.recordsLabel"></span>
                   <div class="bulk-export-summary" data-remove-summary>—</div>
                 </div>
               </div>
 
               <div class="bulk-actions">
-                <button type="button" class="action-btn" data-remove-refresh>${icons.refresh}<span>تحديث القائمة</span></button>
-                <button type="button" class="action-btn" data-remove-arm disabled>${icons.lock}<span>تسليح الحذف</span></button>
-                <button type="button" class="action-btn bulk-run" data-remove-run disabled>${icons.play}<span>حذف الكل</span></button>
-                <button type="button" class="action-btn bulk-stop" data-remove-stop disabled>${icons.pause}<span>إيقاف</span></button>
+                <button type="button" class="action-btn" data-remove-refresh>${icons.refresh}<span data-i18n="ui.common.refresh"></span></button>
+                <button type="button" class="action-btn" data-remove-arm disabled>${icons.lock}<span data-i18n="ui.bulk.remove.arm"></span></button>
+                <button type="button" class="action-btn bulk-run" data-remove-run disabled>${icons.play}<span data-i18n="ui.bulk.remove.runAll"></span></button>
+                <button type="button" class="action-btn bulk-stop" data-remove-stop disabled>${icons.pause}<span data-i18n="ui.common.stop"></span></button>
               </div>
 
-              <div class="bulk-preview" data-remove-preview>لم يتم تحميل القائمة بعد.</div>
+              <div class="bulk-preview" data-remove-preview data-i18n="ui.bulk.remove.previewEmpty"></div>
 
               <div class="history-head">
                 ${icons.history}
-                <strong>سجل الحذف</strong>
+                <strong data-i18n="ui.bulk.remove.logTitle"></strong>
                 <small data-remove-log-count>0</small>
               </div>
               <div class="bulk-log" data-remove-log>
-                <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+                <div class="history-empty" data-i18n="ui.common.logEmpty"></div>
               </div>
 
               <p class="feature-note">${icons.shieldAlert}
-                يجب أن يكون التراجع مفعّلًا حتى تُسجَّل عملية الحذف. بعد اكتمال الحذف يمكنك إعادة كل السجلات بضغطة Ctrl+Z، أو إعادة تنفيذ الحذف بـ Ctrl+Y.
+                <span data-i18n="ui.bulk.remove.footerNote"></span>
               </p>
             </div>
           </div>
 
           <div class="bulk-detail" data-bulk-view="evaluation" hidden>
-            <button type="button" class="bulk-back" data-bulk-back>→ كل الإجراءات الجماعية</button>
+            <button type="button" class="bulk-back" data-bulk-back><span data-i18n="ui.bulk.back"></span></button>
             <div class="bulk-card" data-eval-bulk-root>
               <div class="bulk-head">
                 <span class="feature-icon">${icons.toggles}</span>
                 <span class="feature-titles">
-                  <strong>تقييم جماعي</strong>
-                  <small>درجات امتحان وواجب (أكواد أو أسماء)</small>
+                  <strong data-eval-head-title></strong>
+                  <small data-eval-head-subtitle></small>
                 </span>
-                <span class="feature-badge off" data-eval-badge>جاهز</span>
+                <span class="feature-badge off" data-eval-badge data-i18n="ui.common.ready"></span>
               </div>
 
-              <p class="bulk-note">
-                كل سطر: <strong>المعرّف، القيمة</strong> أو <strong>المعرّف، قيمة، قيمة</strong>. المعرّف كود الطالب أو اسمه. <strong>رقم</strong> (مثل 9.5) = درجة امتحان، <strong>نص تقدير</strong> (مثل امتياز/جيد جدًا/مقبول) = درجة واجب. الترتيب مرن عند اختلاف النوع؛ إن وُجد رقمان معًا فستُطلب منك تحديد أيهما الامتحان وأيهما الواجب. إن أُرسلت قيمة واحدة فقط، تُترك الأخرى على الوضع الافتراضي للصفحة.
-              </p>
+              <p class="bulk-note"><span data-eval-head-note></span></p>
 
               <label class="bulk-field">
-                <span>قائمة التقييم (سطر لكل طالب)</span>
-                <textarea class="bulk-textarea" data-eval-input rows="7" placeholder="2017, 9.5, امتياز&#10;أحمد محمد, جيد جدًا&#10;2018, 8"></textarea>
+                <span data-i18n="ui.bulk.eval.listLabel"></span>
+                <textarea class="bulk-textarea" data-eval-input rows="7" data-i18n-placeholder="ui.bulk.eval.inputPlaceholder"></textarea>
               </label>
 
               <div class="bulk-actions">
-                <button type="button" class="action-btn" data-eval-preview>${icons.toggles}<span>معاينة وتحليل</span></button>
-                <button type="button" class="action-btn" data-eval-arm disabled>${icons.lock}<span>تسليح التنفيذ</span></button>
-                <button type="button" class="action-btn bulk-run" data-eval-run disabled>${icons.play}<span>تنفيذ</span></button>
-                <button type="button" class="action-btn bulk-stop" data-eval-stop disabled>${icons.pause}<span>إيقاف</span></button>
+                <button type="button" class="action-btn" data-eval-preview>${icons.toggles}<span data-i18n="ui.common.previewAnalyze"></span></button>
+                <button type="button" class="action-btn" data-eval-arm disabled>${icons.lock}<span data-i18n="ui.common.armExecution"></span></button>
+                <button type="button" class="action-btn bulk-run" data-eval-run disabled>${icons.play}<span data-i18n="ui.common.run"></span></button>
+                <button type="button" class="action-btn bulk-stop" data-eval-stop disabled>${icons.pause}<span data-i18n="ui.common.stop"></span></button>
               </div>
 
-              <div class="bulk-preview" data-eval-preview-box>لم تتم المعاينة بعد.</div>
+              <div class="bulk-preview" data-eval-preview-box data-i18n="ui.common.previewEmpty"></div>
               <div class="bulk-resolve" data-eval-resolve hidden></div>
 
               <div class="history-head">
                 ${icons.history}
-                <strong>سجل التنفيذ</strong>
+                <strong data-i18n="ui.common.historyTitle"></strong>
                 <small data-eval-log-count>0</small>
+                <button type="button" class="bulk-mini-btn" data-eval-copy-results data-i18n="ui.bulk.eval.copyResults"></button>
               </div>
               <div class="bulk-log" data-eval-log>
-                <div class="history-empty">لا يوجد تنفيذ بعد.</div>
+                <div class="history-empty" data-i18n="ui.common.logEmpty"></div>
               </div>
 
               <p class="feature-note">${icons.shieldAlert}
-                يعمل على صفحة التقييم المحمّلة حاليًا ويطابق الطلاب من صفوف الجدول. التراجع بعد التنفيذ يلغي تغييرات الدفعة في خطوة واحدة (يتطلب تفعيل التراجع). الحفظ يعتمد على سلوك الصفحة وقد يحتاج تأكيدًا حيًا.
+                <span data-i18n="ui.bulk.eval.footerNote"></span>
+              </p>
+            </div>
+          </div>
+
+          <div class="bulk-detail" data-bulk-view="remote" hidden>
+            <button type="button" class="bulk-back" data-bulk-back><span data-i18n="ui.bulk.back"></span></button>
+            <div class="bulk-card" data-remote-root>
+              <div class="bulk-head">
+                <span class="feature-icon">${icons.refresh}</span>
+                <span class="feature-titles">
+                  <strong data-i18n="ui.bulk.menu.remote.title"></strong>
+                  <small data-i18n="ui.bulk.remote.subtitle"></small>
+                </span>
+                <span class="feature-badge off" data-remote-badge data-i18n="ui.common.ready"></span>
+              </div>
+
+              <p class="bulk-note"><span data-i18n="ui.bulk.remote.note"></span></p>
+              <p class="bulk-note bulk-mode-hint" data-remote-mode-note><span data-i18n="ui.bulk.remote.modeNote"></span></p>
+              <p class="bulk-note bulk-mode-hint" data-remote-kind-note hidden><span data-i18n="ui.bulk.remote.kindLocked"></span></p>
+
+              <div class="bulk-grid">
+                <label class="bulk-field">
+                  <span data-i18n="ui.bulk.remote.idLabel"></span>
+                  <input type="text" inputmode="numeric" class="bulk-input" data-remote-id data-i18n-placeholder="ui.bulk.remote.idPlaceholder" />
+                </label>
+              </div>
+              <p class="bulk-note" data-remote-target-note></p>
+
+              <label class="bulk-field">
+                <span data-i18n="ui.bulk.remote.textLabel"></span>
+                <textarea class="bulk-textarea" data-remote-input rows="7"></textarea>
+              </label>
+
+              <div class="bulk-actions">
+                <button type="button" class="action-btn bulk-full" data-remote-refresh>${icons.refresh}<span data-i18n="ui.bulk.remote.refresh"></span></button>
+                <button type="button" class="action-btn" data-remote-prepare>${icons.toggles}<span data-i18n="ui.bulk.remote.prepare"></span></button>
+                <button type="button" class="action-btn" data-remote-arm disabled>${icons.lock}<span data-i18n="ui.bulk.remote.arm"></span></button>
+                <button type="button" class="action-btn bulk-run" data-remote-run disabled>${icons.play}<span data-i18n="ui.bulk.remote.run"></span></button>
+                <button type="button" class="action-btn bulk-stop" data-remote-stop disabled>${icons.pause}<span data-i18n="ui.bulk.remote.stop"></span></button>
+              </div>
+
+              <div class="bulk-preview" data-remote-status data-i18n="ui.common.previewEmpty"></div>
+
+              <p class="feature-note">${icons.shieldAlert}
+                <span data-i18n="ui.bulk.remote.footerNote"></span>
               </p>
             </div>
           </div>
@@ -524,11 +684,11 @@ export function mountShell(): void {
     </div>
   `
   shadow.appendChild(backdrop)
+  applyTranslations(shadow)
 
-  // Firefox retargets key events from a shadow tree to the host <div>. The
-  // platform's document-level scanner handler then thinks no field is focused
-  // and cancels printable keys. Keep typing inside Tamperina's UI (modal and
-  // find bar); only the known global shortcuts bubble to document as before.
+  // The early shield makes our focused field visible to document-level
+  // handlers. This bubble-phase stop is a second line of defence for events
+  // that still escape the shadow tree; global shortcuts are left alone.
   for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'compositionstart', 'compositionupdate', 'compositionend'] as const) {
     shadow.addEventListener(type, (event) => {
       if (isGlobalShortcutKey(event)) return
@@ -552,13 +712,163 @@ export function mountShell(): void {
   const pillButtons = Array.from(pill.querySelectorAll<HTMLButtonElement>('[data-act]'))
   const featureList = backdrop.querySelector<HTMLElement>('[data-feature-list]')!
 
-  const state: ShellState = loadShell()
-
   function persist(): void {
     saveShell(state)
   }
 
   const undoRedo = getUndoRedoController()
+
+  // ---- Exam test controls --------------------------------------------------
+  const WHATSAPP_STATUS_URL = '/whatsapp/status'
+  const WHATSAPP_WORKER_URL = '/whatsapp/worker/'
+  const WHATSAPP_HOLD_KEY = 'tamperina.whatsapp.heldByTamperina.v1'
+  let whatsappHeldLocally = false
+  let whatsappReleasedThisLoad = false
+
+  function whatsappIsHeld(): boolean {
+    return whatsappHeldLocally || tamperinaHoldsWhatsapp()
+  }
+
+  function tamperinaHoldsWhatsapp(): boolean {
+    try {
+      return GM_getValue<boolean | undefined>(WHATSAPP_HOLD_KEY) === true
+    } catch {
+      return false
+    }
+  }
+
+  function markWhatsappHeldByTamperina(held: boolean): void {
+    whatsappHeldLocally = held
+    try {
+      GM_setValue(WHATSAPP_HOLD_KEY, held)
+    } catch {
+      // Storage may be unavailable; the current page still tracks the hold.
+    }
+  }
+
+  function currentExamId(): string {
+    return examIdFromPath(location.pathname) ?? ''
+  }
+
+  function isExamPage(): boolean {
+    return isExamPagePath(location.pathname)
+  }
+
+  function platformCsrf(): string {
+    return document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ''
+  }
+
+  async function setWhatsappSending(enabled: boolean): Promise<boolean> {
+    const csrf = platformCsrf()
+    if (!csrf) return false
+    try {
+      const response = await fetch(`${WHATSAPP_WORKER_URL}${enabled ? 'start' : 'stop'}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', 'X-CSRF-TOKEN': csrf },
+      })
+      if (!response.ok) return false
+      const data = await response.json().catch(() => ({})) as {
+        sending_enabled?: boolean
+        dispatch?: { sending_enabled?: boolean }
+      }
+      const responseEnabled = data.dispatch?.sending_enabled ?? data.sending_enabled
+      if (responseEnabled !== undefined) return Boolean(responseEnabled) === enabled
+      // Some server versions answer with an empty body; verify the real state.
+      return await whatsappSendingEnabled() === enabled
+    } catch {
+      return false
+    }
+  }
+
+  async function whatsappSendingEnabled(): Promise<boolean | null> {
+    try {
+      const response = await fetch(WHATSAPP_STATUS_URL, {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+      })
+      if (!response.ok) return null
+      const data = await response.json() as { dispatch?: { sending_enabled?: boolean }, sending_enabled?: boolean }
+      const value = data.dispatch?.sending_enabled ?? data.sending_enabled
+      return value === undefined ? null : Boolean(value)
+    } catch {
+      return null
+    }
+  }
+
+  function examStageVisible(): boolean {
+    return state.examAttendanceStage && isExamPage() && bulkExamMode
+  }
+
+  function updateExamStagePanel(): void {
+    const visible = examStageVisible()
+    // Before preview the stage table is the input surface. After preview the
+    // same rows move into the normal attendance-style review list to avoid
+    // showing two per-student tables.
+    examStageBox.hidden = !visible || !!bulkParsed
+    if (visible) renderExamStage()
+  }
+
+  function updateWhatsappHoldPanel(held: boolean): void {
+    const panel = ensureHoldPanel()
+    if (!panel) return
+    panel.hidden = !(state.holdWhatsappUntilApproved && held && isComprehensiveExamsPath(location.pathname))
+    if (panel.hidden) return
+    placeHoldNotice(panel, location.pathname)
+    setPagePanelText(
+      panel,
+      t('ui.toggle.whatsappHold.panel'),
+      t('ui.toggle.whatsappHold.held'),
+      t('ui.toggle.whatsappHold.allow'),
+    )
+  }
+
+  async function applyWhatsappHold(): Promise<void> {
+    if (!state.holdWhatsappUntilApproved || whatsappReleasedThisLoad) {
+      updateWhatsappHoldPanel(false)
+      return
+    }
+    const sending = await whatsappSendingEnabled()
+    if (sending === null) {
+      updateWhatsappHoldPanel(whatsappIsHeld())
+      return
+    }
+    if (sending) {
+      const stopped = await setWhatsappSending(false)
+      if (!stopped) {
+        updateWhatsappHoldPanel(false)
+        toast({ title: t('ui.toggle.whatsappHold.failed'), variant: 'error' })
+        return
+      }
+      // Only a stop issued by this feature may be auto-resumed later.
+      markWhatsappHeldByTamperina(true)
+    }
+    updateWhatsappHoldPanel(whatsappIsHeld())
+  }
+
+  async function releaseWhatsappHold(options?: { silent?: boolean }): Promise<void> {
+    if (!whatsappIsHeld()) {
+      updateWhatsappHoldPanel(false)
+      return
+    }
+    const released = await setWhatsappSending(true)
+    if (!released) {
+      if (!options?.silent) toast({ title: t('ui.toggle.whatsappHold.failed'), variant: 'error' })
+      return
+    }
+    markWhatsappHeldByTamperina(false)
+    whatsappReleasedThisLoad = true
+    updateWhatsappHoldPanel(false)
+    if (!options?.silent) {
+      toast({ title: t('ui.toggle.whatsappHold.released'), variant: 'applied' })
+    }
+  }
+
+  function wirePagePanels(): void {
+    const holdPanel = ensureHoldPanel()
+    holdPanel?.querySelector('button')?.addEventListener('click', () => void releaseWhatsappHold())
+  }
+
   let featureSignature = ''
 
   function featureStateSignature(controller: UndoRedoController): string {
@@ -571,6 +881,11 @@ export function mountShell(): void {
       controller.history.map((action) => `${action.id}:${action.title}`).join('|'),
       evaluationFeatureStateSignature(),
       isEvaluationPage(),
+      isExamPage(),
+      state.examAttendanceStage,
+      state.holdWhatsappUntilApproved,
+      state.remoteBulk,
+      getLocale(),
     ].join('~')
   }
 
@@ -580,37 +895,37 @@ export function mountShell(): void {
       {
         id: 'student-select' as const,
         icon: icons.userCheck,
-        title: 'اختيار الطالب والاختصارات',
-        desc: 'انقر على صف الطالب لاختياره، ثم حدد التقدير بحرف أو اكتب درجة الامتحان بالأرقام والنقطة. الحروف تعمل باللوحتين العربية والإنجليزية.',
-        note: '؟ / h → امتياز · ج / [ → جيد جدا · ح / p → جيد · م / l → مقبول · ض / q → ضعيف · ن / k → الواجب ناقص',
+        title: t('ui.feature.studentSelect.title'),
+        desc: t('ui.feature.studentSelect.desc'),
+        note: t('ui.feature.studentSelect.note'),
       },
       {
         id: 'evaluation-find' as const,
         icon: icons.search,
-        title: 'شريط البحث في التقييم',
-        desc: 'Ctrl+Alt+F يفتح شريط بحث في أسفل الصفحة يبحث في كل صفوف الطلاب. كتابة رقم مكوّن من ٤ خانات تحدد الطالب تلقائيًا.',
-        note: 'Enter / Shift+Enter للتنقل بين النتائج، وEsc للإغلاق.',
+        title: t('ui.feature.evalFind.title'),
+        desc: t('ui.feature.evalFind.desc'),
+        note: t('ui.feature.evalFind.note'),
       },
     ]
 
     return cards.map((card) => {
       const enabled = isFeatureEnabled(card.id)
       const badge = !onPage
-        ? { text: 'غير متاح', className: 'off' }
+        ? { text: t('ui.common.unavailable'), className: 'off' }
         : enabled
-          ? { text: 'مفعّل', className: 'on' }
-          : { text: 'متوقف', className: 'off' }
+          ? { text: t('ui.common.enabled'), className: 'on' }
+          : { text: t('ui.common.disabled'), className: 'off' }
       return `
         <section class="feature-card">
           <header class="feature-head">
             <span class="feature-icon">${card.icon}</span>
             <span class="feature-titles">
               <strong>${card.title}</strong>
-              <small>${onPage ? 'تقييم الحصة' : 'تقييم الحصة فقط'}</small>
+              <small>${onPage ? t('ui.feature.scope.evaluation') : t('ui.feature.scope.evaluationOnly')}</small>
             </span>
             <span class="feature-badge ${badge.className}">${badge.text}</span>
             <button type="button" class="switch" data-feature-id="${card.id}" role="switch"
-              aria-checked="${enabled}" aria-label="تشغيل أو إيقاف ${card.title}" ${onPage ? '' : 'disabled'}><span></span></button>
+              aria-checked="${enabled}" aria-label="${t('ui.feature.switchAria', { p0: card.title })}" ${onPage ? '' : 'disabled'}><span></span></button>
           </header>
           <p class="feature-desc">${card.desc}</p>
           <p class="feature-note">${icons.keyboard} ${card.note}</p>
@@ -621,57 +936,135 @@ export function mountShell(): void {
 
   function renderFeature(controller: UndoRedoController): void {
     ensureToggleEffectsStyle()
-    const centerState = localStorage.getItem('tamperina_center_modal') === 'true'
-    const barcodeHidden = localStorage.getItem('tamperina_barcode_hidden') === 'true'
+
+    // Rebuilding the feature list detaches the focused switch. Remember which
+    // control had focus so keyboard users can keep toggling after the rebuild.
+    const activeControl = (shadow.activeElement as HTMLElement | null)
+      ?.closest<HTMLElement>('[data-locale-toggle], [data-feature-toggle], [data-undo], [data-redo], [data-feature-id]') ?? null
+    const focusSelector = activeControl && featureList.contains(activeControl)
+      ? activeControl.hasAttribute('data-locale-toggle') ? '[data-locale-toggle]'
+        : activeControl.hasAttribute('data-feature-toggle') ? '[data-feature-toggle]'
+          : activeControl.hasAttribute('data-undo') ? '[data-undo]'
+            : activeControl.hasAttribute('data-redo') ? '[data-redo]'
+              : activeControl.dataset.featureId
+                ? `[data-feature-id="${CSS.escape(activeControl.dataset.featureId)}"]`
+                : null
+      : null
+    const restoreFocus = (): void => {
+      if (!focusSelector) return
+      const replacement = featureList.querySelector<HTMLElement>(focusSelector)
+      if (replacement && !replacement.hasAttribute('disabled')) replacement.focus()
+    }
+
+    const centerState = readFlag('tamperina_center_modal')
+    const barcodeHidden = readFlag('tamperina_barcode_hidden')
 
     document.documentElement.classList.toggle('centered-payment-modal', centerState)
     document.documentElement.classList.toggle('barcode-hidden', barcodeHidden)
 
+    const introClass = featureCardsIntroduced ? '' : ' feature-card--new'
+    featureCardsIntroduced = true
     const generalTogglesHtml = `
       <section class="feature-card">
         <header class="feature-head">
           <span class="feature-icon">${icons.center}</span>
-          <span class="feature-titles"><strong>مركِز نافذة الدفع</strong></span>
-          <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="تمركُز نافذة الدفع"><span></span></button>
+          <span class="feature-titles"><strong>${t('ui.toggle.center.title')}</strong></span>
+          <button type="button" class="switch" data-feature-id="center-modal" role="switch" aria-checked="${centerState}" aria-label="${t('ui.toggle.center.aria')}"><span></span></button>
         </header>
       </section>
       <section class="feature-card">
         <header class="feature-head">
           <span class="feature-icon">${icons.barcode}</span>
-          <span class="feature-titles"><strong>إخفاء الباركود</strong></span>
-          <button type="button" class="switch" data-feature-id="hide-barcode" role="switch" aria-checked="${barcodeHidden}" aria-label="إخفاء أيقونة الباركود"><span></span></button>
+          <span class="feature-titles"><strong>${t('ui.toggle.barcode.title')}</strong></span>
+          <button type="button" class="switch" data-feature-id="hide-barcode" role="switch" aria-checked="${barcodeHidden}" aria-label="${t('ui.toggle.barcode.aria')}"><span></span></button>
         </header>
       </section>
+      <div class="feature-separator" role="separator"></div>
+      <section class="feature-card${introClass} ${state.examAttendanceStage ? 'is-on' : ''}">
+        <header class="feature-head">
+          <span class="feature-icon">${icons.bulk}</span>
+          <span class="feature-titles">
+            <strong>${t('ui.toggle.examStage.title')}</strong>
+            <small>${t('ui.toggle.examStage.scope', { p0: currentExamId() || '—' })}</small>
+          </span>
+          <span class="feature-badge ${state.examAttendanceStage ? 'on' : 'off'}">${state.examAttendanceStage ? t('ui.common.enabled') : t('ui.common.disabled')}</span>
+          <button type="button" class="switch" data-feature-id="exam-stage" role="switch"
+            aria-checked="${state.examAttendanceStage}" aria-label="${t('ui.feature.switchAria', { p0: t('ui.toggle.examStage.title') })}"><span></span></button>
+        </header>
+        <p class="feature-desc">${t('ui.toggle.examStage.desc')}</p>
+      </section>
+      <div class="feature-separator" role="separator"></div>
+      <section class="feature-card${introClass} ${state.holdWhatsappUntilApproved ? 'is-on' : ''}">
+        <header class="feature-head">
+          <span class="feature-icon">${icons.play}</span>
+          <span class="feature-titles"><strong>${t('ui.toggle.whatsappHold.title')}</strong></span>
+          <span class="feature-badge ${state.holdWhatsappUntilApproved ? 'on' : 'off'}">${state.holdWhatsappUntilApproved ? t('ui.common.enabled') : t('ui.common.disabled')}</span>
+          <button type="button" class="switch" data-feature-id="whatsapp-hold" role="switch"
+            aria-checked="${state.holdWhatsappUntilApproved}" aria-label="${t('ui.feature.switchAria', { p0: t('ui.toggle.whatsappHold.title') })}"><span></span></button>
+        </header>
+        <p class="feature-desc">${t('ui.toggle.whatsappHold.desc')}</p>
+      </section>
+      <div class="feature-separator" role="separator"></div>
+      <section class="feature-card${introClass} ${state.remoteBulk ? 'is-on' : ''}">
+        <header class="feature-head">
+          <span class="feature-icon">${icons.refresh}</span>
+          <span class="feature-titles">
+            <strong>${t('ui.toggle.remoteBulk.title')}</strong>
+            <small>${t('ui.toggle.remoteBulk.scope')}</small>
+          </span>
+          <span class="feature-badge ${state.remoteBulk ? 'on' : 'off'}">${state.remoteBulk ? t('ui.common.enabled') : t('ui.common.disabled')}</span>
+          <button type="button" class="switch" data-feature-id="remote-bulk" role="switch"
+            aria-checked="${state.remoteBulk}" aria-label="${t('ui.feature.switchAria', { p0: t('ui.toggle.remoteBulk.title') })}"><span></span></button>
+        </header>
+        <p class="feature-desc">${t('ui.toggle.remoteBulk.desc')}</p>
+      </section>
     `
+    // The language switch is intentionally the very last card in the menu.
+    const englishToggleHtml = `
+      <section class="feature-card">
+        <header class="feature-head">
+          <span class="feature-icon">${icons.toggles}</span>
+          <span class="feature-titles"><strong>${t('ui.toggle.english.title')}</strong></span>
+          <button type="button" class="switch" data-locale-toggle role="switch" aria-checked="${state.locale === 'en'}" aria-label="${t('ui.toggle.english.aria')}"><span></span></button>
+        </header>
+        <p class="feature-desc">${t('ui.toggle.english.desc')}</p>
+      </section>
+    `
+    const separator = '<div class="feature-separator" role="separator"></div>'
 
     if (!controller.supported) {
       featureList.innerHTML = `
         ${generalTogglesHtml}
+        ${separator}
         ${evaluationTogglesHtml()}
+        ${separator}
         <section class="feature-card">
           <header class="feature-head">
             <span class="feature-icon">${icons.undo}</span>
             <span class="feature-titles">
-              <strong>التراجع وإعادة التنفيذ</strong>
-              <small>غير متاح في هذه الصفحة</small>
+              <strong>${t('ui.toggle.undo.title')}</strong>
+              <small>${t('ui.toggle.undo.notAvailable')}</small>
             </span>
-            <span class="feature-badge off">غير متاح</span>
+            <span class="feature-badge off">${t('ui.common.unavailable')}</span>
             <button type="button" class="switch" data-feature-toggle role="switch"
-              aria-checked="${controller.enabled}" aria-label="تشغيل أو إيقاف التراجع" disabled><span></span></button>
+              aria-checked="${controller.enabled}" aria-label="${t('ui.toggle.undo.aria')}" disabled><span></span></button>
           </header>
           <p class="feature-desc">
-            يعمل هذا المفتاح في صفحتي الحضور والتقييم فقط.
+            ${t('ui.toggle.undo.descShort')}
           </p>
         </section>
+        ${separator}
+        ${englishToggleHtml}
       `
+      restoreFocus()
       return
     }
 
     const badge = controller.busy
-      ? { text: 'جارٍ التنفيذ', className: 'busy' }
+      ? { text: t('ui.common.running'), className: 'busy' }
       : controller.enabled
-        ? { text: 'مفعّل', className: 'on' }
-        : { text: 'متوقف', className: 'off' }
+        ? { text: t('ui.common.enabled'), className: 'on' }
+        : { text: t('ui.common.disabled'), className: 'off' }
 
     const recent = controller.history.slice(0, 6)
     const historyHtml = recent.length
@@ -684,51 +1077,56 @@ export function mountShell(): void {
             </span>
           </li>
         `).join('')}</ul>`
-      : `<div class="history-empty">لا توجد عمليات مسجلة في هذه الصفحة بعد.</div>`
+      : `<div class="history-empty">${t('ui.toggle.undo.emptyHistory')}</div>`
 
     featureList.innerHTML = `
       ${generalTogglesHtml}
+      ${separator}
       ${evaluationTogglesHtml()}
+      ${separator}
       <section class="feature-card">
         <header class="feature-head">
           <span class="feature-icon">${icons.undo}</span>
           <span class="feature-titles">
-            <strong>التراجع وإعادة التنفيذ</strong>
+            <strong>${t('ui.toggle.undo.title')}</strong>
             <small>${featureScopeLabel()}</small>
           </span>
           <span class="feature-badge ${badge.className}">${badge.text}</span>
           <button type="button" class="switch" data-feature-toggle role="switch"
-            aria-checked="${controller.enabled}" aria-label="تشغيل أو إيقاف التراجع"
+            aria-checked="${controller.enabled}" aria-label="${t('ui.toggle.undo.aria')}"
             ${controller.busy ? 'disabled' : ''}><span></span></button>
         </header>
 
         <p class="feature-desc">
-          يسجّل تمبرينا عمليات الحضور التي تنفذها، ويتيح إلغاءها أو إعادتها بضغطة مفتاح.
+          ${t('ui.toggle.undo.desc')}
         </p>
 
         <div class="feature-actions">
           <button type="button" class="action-btn" data-undo
             ${!controller.enabled || !controller.canUndo || controller.busy ? 'disabled' : ''}>
-            ${icons.undo}<span>تراجع</span><kbd>Ctrl+Z</kbd>
+            ${icons.undo}<span>${t('ui.toggle.undo.undo')}</span><kbd>Ctrl+Z</kbd>
           </button>
           <button type="button" class="action-btn" data-redo
             ${!controller.enabled || !controller.canRedo || controller.busy ? 'disabled' : ''}>
-            ${icons.redo}<span>إعادة</span><kbd>Ctrl+Y</kbd>
+            ${icons.redo}<span>${t('ui.toggle.undo.redo')}</span><kbd>Ctrl+Y</kbd>
           </button>
         </div>
 
         <div class="history-head">
           ${icons.history}
-          <strong>السجل</strong>
-          <small>${controller.history.length} عملية</small>
+          <strong>${t('ui.toggle.undo.historyTitle')}</strong>
+          <small>${t('ui.toggle.undo.historyCount', { p0: controller.history.length })}</small>
         </div>
         ${historyHtml}
 
         <p class="feature-note">${icons.shieldAlert}
-          يُحفظ السجل في جلسة المتصفح (sessionStorage): يبقى بعد تحديث الصفحة أو الانتقال بين صفحات المنصة، ويُمسح عند إغلاق التبويب أو المتصفح. مفتاح التشغيل هو السماح بتنفيذ التراجع. في صفحة الحضور تعمل الاختصارات حتى أثناء كتابة حقل البحث.
+          ${t('ui.toggle.undo.footerNote')}
         </p>
       </section>
+      ${separator}
+      ${englishToggleHtml}
     `
+    restoreFocus()
   }
 
   function renderFeatureIfNeeded(): void {
@@ -739,10 +1137,27 @@ export function mountShell(): void {
   }
 
   undoRedo.subscribe(renderFeatureIfNeeded)
-  window.addEventListener('popstate', renderFeatureIfNeeded)
+  window.addEventListener('popstate', () => {
+    renderFeatureIfNeeded()
+    renderBulkMenu()
+  })
+
+  /** Update a toggle card in place so its CSS transitions are not lost to a rebuild. */
+  function syncToggleCard(button: HTMLButtonElement, enabled: boolean): void {
+    const card = button.closest<HTMLElement>('.feature-card')
+    if (!card) return
+    card.classList.toggle('is-on', enabled)
+    const badge = card.querySelector<HTMLElement>('.feature-badge')
+    if (!badge) return
+    badge.className = `feature-badge ${enabled ? 'on' : 'off'}`
+    badge.textContent = enabled ? t('ui.common.enabled') : t('ui.common.disabled')
+  }
 
   function render(): void {
-    shellEl.style.left = `${state.x}%`
+    // The pin tooltip carries an interpolated hotkey, so applyTranslations()
+    // cannot own it; refresh it here alongside the other dynamic titles.
+    pin.title = t('ui.pin.title', { p0: HOTKEY_RESTORE })
+    shellEl.style.insetInlineStart = `${state.x}%`
     shellEl.style.top = `${state.y}%`
     shellEl.style.setProperty('--size', `${state.size}px`)
     flip.classList.toggle('mirrored', state.mirrored)
@@ -750,7 +1165,20 @@ export function mountShell(): void {
     spin.classList.toggle('frame-1', state.frame === 1)
     spin.classList.toggle('frame-2', state.frame === 2)
     spin.classList.toggle('frame-3', state.frame === 3)
+    const wasClickThrough = shellEl.classList.contains('clickthrough')
     shellEl.classList.toggle('clickthrough', state.clickThrough)
+    // In click-through mode the launcher is a ghost that cannot receive pointer
+    // events, so it must also leave the Tab order and the accessibility tree.
+    // The pin button is the visible, focusable way to restore it.
+    launcher.tabIndex = state.clickThrough ? -1 : 0
+    if (state.clickThrough) launcher.setAttribute('aria-hidden', 'true')
+    else launcher.removeAttribute('aria-hidden')
+    if (wasClickThrough && !state.clickThrough
+      && (shadow.activeElement as HTMLElement | null) === pin) {
+      // The pin is about to be display:none; hand focus back to the launcher
+      // so it isn't dropped to <body>. Covers pin click, hotkey and GM menu.
+      launcher.focus()
+    }
     frames.hidden = !state.paused
 
     for (const btn of pillButtons) {
@@ -761,19 +1189,28 @@ export function mountShell(): void {
         || (act === 'clickThrough' && state.clickThrough)
         || (act === 'frame' && Number(btn.dataset.frame) === state.frame)
       btn.classList.toggle('active', active)
-      btn.setAttribute('aria-pressed', String(active))
+      // Only real toggles carry aria-pressed; shrink/grow are one-shot actions.
+      if (act === 'mirror' || act === 'pause' || act === 'lock'
+        || act === 'clickThrough' || act === 'frame') {
+        btn.setAttribute('aria-pressed', String(active))
+      }
     }
 
     const pauseBtn = pill.querySelector<HTMLButtonElement>('[data-act="pause"]')!
     pauseBtn.innerHTML = state.paused ? icons.play : icons.pause
-    pauseBtn.title = state.paused ? 'تشغيل الحركة' : 'إيقاف الحركة'
+    pauseBtn.title = state.paused ? t('ui.pill.play') : t('ui.pill.pause')
 
     const lockBtn = pill.querySelector<HTMLButtonElement>('[data-act="lock"]')!
     lockBtn.innerHTML = state.locked ? icons.lock : icons.lockOpen
-    lockBtn.title = state.locked ? 'فتح الموضع' : 'تثبيت الموضع'
+    lockBtn.title = state.locked ? t('ui.pill.unlock') : t('ui.pill.lock')
 
     for (const tab of tabButtons) {
-      tab.classList.toggle('active', tab.dataset.tab === state.activeTab)
+      const active = tab.dataset.tab === state.activeTab
+      tab.classList.toggle('active', active)
+      tab.setAttribute('aria-selected', String(active))
+      // Roving tabindex: only the active tab is in the Tab sequence; arrow
+      // keys move between tabs (see the tablist keydown handler below).
+      tab.tabIndex = active ? 0 : -1
     }
     const activeTab = tabButtons.find((tab) => tab.dataset.tab === state.activeTab) ?? tabButtons[0]
     if (activeTab && tabIndicator) {
@@ -847,7 +1284,13 @@ export function mountShell(): void {
         break
       }
       case 'lock': state.locked = !state.locked; break
-      case 'clickThrough': state.clickThrough = !state.clickThrough; break
+      case 'clickThrough': {
+        state.clickThrough = !state.clickThrough
+        // The pill is hidden in click-through mode, so hand focus to the pin
+        // restore button; otherwise keyboard focus would be stranded.
+        if (state.clickThrough) window.setTimeout(() => pin.focus(), 0)
+        break
+      }
     }
     persist()
     render()
@@ -896,7 +1339,9 @@ export function mountShell(): void {
       launcher.classList.add('dragging')
     }
     if (!moved) return
-    state.x = clamp(startX + (dx / window.innerWidth) * 100, 4, 96)
+    // x is an inline percentage: in RTL, moving the pointer right decreases it.
+    const inlineSign = getComputedStyle(host).direction === 'rtl' ? -1 : 1
+    state.x = clamp(startX + inlineSign * (dx / window.innerWidth) * 100, 4, 96)
     state.y = clamp(startY + (dy / window.innerHeight) * 100, 5, 95)
     render()
   })
@@ -913,6 +1358,7 @@ export function mountShell(): void {
   launcher.addEventListener('pointerup', endDrag)
   launcher.addEventListener('pointercancel', endDrag)
   launcher.addEventListener('keydown', (event) => {
+    if (state.clickThrough) return
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
       openModal()
@@ -935,17 +1381,64 @@ export function mountShell(): void {
 
   for (const tab of tabButtons) {
     tab.addEventListener('click', () => {
-      state.activeTab = tab.dataset.tab === 'bulk' ? 'bulk' : 'toggles'
+      const nextTab = tab.dataset.tab === 'bulk' ? 'bulk' : 'toggles'
+      const returningToBulk = nextTab === 'bulk' && state.activeTab === 'bulk'
+      state.activeTab = nextTab
       persist()
+      // Clicking the already-active Bulk tab is a shortcut back to the menu,
+      // out of whichever bulk action detail happens to be open.
+      if (returningToBulk) showBulkView('menu')
       render()
     })
   }
 
+  // Arrow keys move between tabs and focus the newly selected one, per the
+  // WAI-ARIA tabs pattern. Horizontal arrows follow visual order, so they
+  // reverse in RTL. Home/End jump to the first/last tab.
+  const tablist = backdrop.querySelector<HTMLElement>('.tabs')!
+  tablist.addEventListener('keydown', (event) => {
+    if (!tabButtons.length) return
+    // Inside a shadow tree, document.activeElement is the shadow HOST, not the
+    // focused tab. event.target is the real tab; shadow.activeElement is a
+    // fallback for synthetic events.
+    const focused = (event.target as HTMLElement | null) ?? (shadow.activeElement as HTMLElement | null)
+    const currentIndex = tabButtons.indexOf(focused as HTMLButtonElement)
+    if (currentIndex < 0) return
+    const rtl = getComputedStyle(tablist).direction === 'rtl'
+    let nextIndex: number
+    switch (event.key) {
+      case 'ArrowRight':
+        nextIndex = (currentIndex + (rtl ? -1 : 1) + tabButtons.length) % tabButtons.length
+        break
+      case 'ArrowLeft':
+        nextIndex = (currentIndex + (rtl ? 1 : -1) + tabButtons.length) % tabButtons.length
+        break
+      case 'Home':
+        nextIndex = 0
+        break
+      case 'End':
+        nextIndex = tabButtons.length - 1
+        break
+      default:
+        return
+    }
+    event.preventDefault()
+    const next = tabButtons[nextIndex]
+    state.activeTab = next.dataset.tab === 'bulk' ? 'bulk' : 'toggles'
+    persist()
+    render()
+    next.focus()
+  })
+
   featureList.addEventListener('click', (event) => {
-    const btn = (event.target as Element).closest<HTMLButtonElement>('[data-feature-toggle], [data-undo], [data-redo], [data-feature-id]')
+    const btn = (event.target as Element).closest<HTMLButtonElement>('[data-locale-toggle], [data-feature-toggle], [data-undo], [data-redo], [data-feature-id]')
     if (!btn || btn.disabled) return
     event.stopPropagation()
-    if (btn.hasAttribute('data-feature-toggle')) {
+    if (btn.hasAttribute('data-locale-toggle')) {
+      state.locale = state.locale === 'en' ? 'ar' : 'en'
+      persist()
+      setLocale(state.locale)
+    } else if (btn.hasAttribute('data-feature-toggle')) {
       const next = !undoRedo.enabled
       btn.setAttribute('aria-checked', String(next))
       window.setTimeout(() => undoRedo.setEnabled(next), 180)
@@ -961,14 +1454,53 @@ export function mountShell(): void {
         window.setTimeout(() => setFeatureEnabled(featureId, next), 180)
         return
       }
+      if (featureId === 'exam-stage' || featureId === 'whatsapp-hold' || featureId === 'remote-bulk') {
+        const current = featureId === 'exam-stage' ? state.examAttendanceStage
+          : featureId === 'whatsapp-hold' ? state.holdWhatsappUntilApproved
+            : state.remoteBulk
+        const next = !current
+        if (featureId === 'exam-stage') state.examAttendanceStage = next
+        else if (featureId === 'whatsapp-hold') state.holdWhatsappUntilApproved = next
+        else state.remoteBulk = next
+        persist()
+        btn.setAttribute('aria-checked', String(next))
+        syncToggleCard(btn, next)
+        if (featureId === 'exam-stage') {
+          disarmBulk(t('ui.common.dataEdited'))
+          if (next) {
+            syncExamStageFromEntries(dedupeEntries(allExecutableEntries()))
+            void analyzeBulkInput()
+          } else {
+            examStage = []
+            renderExamStage()
+            updateBulkButtons()
+          }
+          updateExamStagePanel()
+        } else if (featureId === 'whatsapp-hold') {
+          if (!next) {
+            if (whatsappIsHeld()) void releaseWhatsappHold({ silent: true })
+            else updateWhatsappHoldPanel(false)
+          } else {
+            whatsappReleasedThisLoad = false
+            void applyWhatsappHold()
+          }
+        } else {
+          // The toggle changes how every bulk action behaves, so leave any
+          // open detail view and refresh the menu's availability badges.
+          if (currentBulkView !== 'menu') showBulkView('menu')
+          resetRemoteFlow()
+          renderBulkMenu()
+        }
+        return
+      }
       const storageKey = featureId === 'center-modal'
         ? 'tamperina_center_modal'
         : featureId === 'hide-barcode'
           ? 'tamperina_barcode_hidden'
           : `tamperina_${featureId}`
-      const current = localStorage.getItem(storageKey) === 'true'
+      const current = readFlag(storageKey)
       const newState = !current
-      localStorage.setItem(storageKey, String(newState))
+      writeFlag(storageKey, newState)
       btn.setAttribute('aria-checked', String(newState))
       if (featureId === 'center-modal') {
         document.documentElement.classList.toggle('centered-payment-modal', newState)
@@ -1007,6 +1539,9 @@ export function mountShell(): void {
       if ((undoShortcut || redoShortcut)
         && (undoRedo.supported || undoRedo.canUndo || undoRedo.canRedo)
         && undoRedo.enabled
+        // A bulk batch is accumulating actions; undoing here would pop a
+        // previously committed action out from under the open batch.
+        && !undoRedo.batching
         && (isAttendancePage() || insideTamperina || !isEditableTarget(realTarget))) {
         event.preventDefault()
         if (redoShortcut) void undoRedo.redo()
@@ -1067,6 +1602,8 @@ export function mountShell(): void {
   const bulkStopBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-stop]')!
   const bulkPreviewBox = bulkRoot.querySelector<HTMLElement>('[data-bulk-preview-box]')!
   const bulkResolveBox = bulkRoot.querySelector<HTMLElement>('[data-bulk-resolve]')!
+  const examStageBox = bulkRoot.querySelector<HTMLElement>('[data-exam-stage]')!
+  const examStageTable = bulkRoot.querySelector<HTMLElement>('[data-exam-stage-table]')!
   const bulkLog = bulkRoot.querySelector<HTMLElement>('[data-bulk-log]')!
   const bulkLogCount = bulkRoot.querySelector<HTMLElement>('[data-bulk-log-count]')!
   const bulkDiagnostics = bulkRoot.querySelector<HTMLElement>('[data-bulk-diagnostics]')!
@@ -1075,6 +1612,7 @@ export function mountShell(): void {
   const bulkCopyDebugBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-copy-debug]')!
   const bulkCopyFailedBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-copy-failed]')!
   const bulkCopySkippedBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-copy-skipped]')!
+  const bulkRetryBtn = bulkRoot.querySelector<HTMLButtonElement>('[data-bulk-retry]')!
   const bulkBadge = bulkRoot.querySelector<HTMLElement>('[data-bulk-state-badge]')!
   const bulkModeBtns = Array.from(bulkRoot.querySelectorAll<HTMLButtonElement>('[data-bulk-mode-toggle] [data-mode]'))
 
@@ -1088,6 +1626,119 @@ export function mountShell(): void {
   const exportCopyBtn = exportRoot.querySelector<HTMLButtonElement>('[data-export-copy]')!
   const exportDownloadBtn = exportRoot.querySelector<HTMLButtonElement>('[data-export-download]')!
 
+  interface ExamStageRow extends ExamStageRowView {
+    label: string
+  }
+
+  let examStage: ExamStageRow[] = []
+  let examStageCounter = 0
+
+  function makeExamStageRow(code = '', label = ''): ExamStageRow {
+    examStageCounter++
+    return {
+      id: `stage-${examStageCounter}`,
+      enabled: true,
+      code,
+      label,
+      options: { paymentStatus: 'paid', amountPaid: '0.00', paymentNote: '', source: 'manual' },
+    }
+  }
+
+  function examStageEntries(): Array<{ code: string, label?: string, exam?: ExamCheckinOptions }> {
+    return examStage
+      .filter((row) => row.enabled && !!normalizeStudentCode(row.code))
+      .map((row) => ({
+        code: normalizeStudentCode(row.code),
+        label: row.label || t('ui.bulk.menu.examAttendance.title'),
+        exam: row.options,
+      }))
+  }
+
+  function syncBulkCodesFromStage(): void {
+    bulkCodesInput.value = examStage
+      .filter((row) => row.enabled && !!normalizeStudentCode(row.code))
+      .map((row) => normalizeStudentCode(row.code))
+      .join('\n')
+  }
+
+  function refreshStageAnalysis(): void {
+    if (!examStage.length) {
+      bulkCodesInput.value = ''
+      bulkParsed = null
+      bulkNameRows = []
+      bulkArmed = false
+      bulkPreviewBox.textContent = t('ui.bulk.exam.stage.empty')
+      renderExamStage()
+      renderBulkResolve()
+      updateBulkButtons()
+      return
+    }
+    syncBulkCodesFromStage()
+    void analyzeBulkInput()
+  }
+
+  function markExamStageChanged(): void {
+    bulkArmed = false
+    setBulkBadge(t('ui.common.dataEdited'), 'off')
+    updateBulkButtons()
+  }
+
+  function examStageLabels(): ExamStageLabels {
+    return {
+      title: t('ui.bulk.exam.stage.title'),
+      note: t('ui.bulk.exam.stage.note'),
+      empty: t('ui.bulk.exam.stage.empty'),
+      include: t('ui.bulk.exam.stage.include'),
+      ready: t('ui.common.ready'),
+      excluded: t('ui.bulk.attendance.ignored'),
+      studentCode: t('ui.common.studentCode'),
+      codePlaceholder: t('ui.bulk.exam.stage.codePlaceholder'),
+      statusLabel: t('ui.bulk.exam.stage.statusLabel'),
+      amountLabel: t('ui.bulk.exam.stage.amountLabel'),
+      noteLabel: t('ui.bulk.exam.stage.noteLabel'),
+      sourceLabel: t('ui.bulk.exam.stage.sourceLabel'),
+      remove: t('ui.bulk.exam.stage.remove'),
+      add: t('ui.bulk.exam.stage.add'),
+      status: {
+        paid: t('ui.bulk.exam.stage.status.paid'),
+        exempt: t('ui.bulk.exam.stage.status.exempt'),
+        deferred: t('ui.bulk.exam.stage.status.deferred'),
+      },
+      source: {
+        manual: t('ui.bulk.exam.stage.source.manual'),
+        scanner: t('ui.bulk.exam.stage.source.scanner'),
+        camera: t('ui.bulk.exam.stage.source.camera'),
+        image: t('ui.bulk.exam.stage.source.image'),
+      },
+    }
+  }
+
+  function renderExamStage(): void {
+    for (const btn of bulkRoot.querySelectorAll<HTMLButtonElement>('[data-exam-stage-add]')) {
+      btn.disabled = bulkRunning
+    }
+    examStageTable.innerHTML = renderExamStageTable(examStage, examStageLabels())
+  }
+
+  function syncExamStageFromEntries(entries: Array<{ code: string, label?: string, exam?: ExamCheckinOptions }>): void {
+    const previous = new Map(examStage.map((row) => [row.code, row]))
+    const next: ExamStageRow[] = []
+    for (const entry of entries) {
+      const code = normalizeStudentCode(entry.code)
+      if (!code) continue
+      const existing = previous.get(code)
+      next.push(existing ? { ...existing, code, label: entry.label ?? existing.label } : makeExamStageRow(code, entry.label))
+    }
+    // Keep blank rows the user just added so they can type the next student.
+    for (const row of examStage) {
+      if (!normalizeStudentCode(row.code) && !next.some((item) => item.id === row.id)) next.push(row)
+    }
+    examStage = next.length ? next : [makeExamStageRow()]
+    renderExamStage()
+  }
+
+  let bulkExamMode = false
+  let bulkRan = false
   let bulkParsed: ParseEntriesResult | null = null
   let bulkNameRows: NameRow[] = []
   let bulkArmed = false
@@ -1098,10 +1749,61 @@ export function mountShell(): void {
   let bulkLogRows: BulkRowResult[] = []
   let bulkDiagnosticReport = ''
   const BULK_LAST_RUN_KEY = 'tamperina.bulk.lastRun.v1'
+  const MAX_STORED_INPUT = 100_000
+  const STORED_ROW_STATUSES = new Set<BulkRowResult['status']>([
+    'created', 'duplicate', 'skipped-known', 'timeout', 'error', 'stopped',
+  ])
+  const STORED_PAYMENT_STATUSES = new Set<PaymentStatus>(['paid', 'partial', 'discounted', 'forgotten'])
+
+  /** sessionStorage belongs to the host page, so every field is untrusted. */
   interface StoredBulkRun {
     report: string
     rows: BulkRowResult[]
+    input?: string
+    lessonId?: string
+    paymentMode?: PaymentMode
+    overrides?: Array<[string, PaymentOverride]>
   }
+  function isStoredRow(value: unknown): value is BulkRowResult {
+    if (!value || typeof value !== 'object') return false
+    const row = value as Partial<BulkRowResult>
+    return typeof row.code === 'string'
+      && row.code.length <= 256
+      && typeof row.status === 'string'
+      && STORED_ROW_STATUSES.has(row.status as BulkRowResult['status'])
+      && typeof row.at === 'number'
+      && Number.isFinite(row.at)
+      && (row.label === undefined || typeof row.label === 'string')
+      && (row.message === undefined || typeof row.message === 'string')
+      && (row.recordId === undefined || typeof row.recordId === 'string')
+      && (row.debug === undefined || (!!row.debug && typeof row.debug === 'object'))
+  }
+  function isStoredOverride(value: unknown): value is [string, PaymentOverride] {
+    if (!Array.isArray(value) || value.length !== 2) return false
+    const [code, override] = value as [unknown, unknown]
+    if (typeof code !== 'string' || !override || typeof override !== 'object') return false
+    const payment = override as Partial<PaymentOverride>
+    if (typeof payment.studentCode !== 'string') return false
+    if (typeof payment.status !== 'string' || !STORED_PAYMENT_STATUSES.has(payment.status as PaymentStatus)) return false
+    if (payment.amountPaid !== undefined && (typeof payment.amountPaid !== 'number' || !Number.isFinite(payment.amountPaid) || payment.amountPaid < 0)) return false
+    if (payment.note !== undefined && typeof payment.note !== 'string') return false
+    return true
+  }
+  function parseStoredRun(raw: unknown): StoredBulkRun | null {
+    if (!raw || typeof raw !== 'object') return null
+    const value = raw as Partial<StoredBulkRun>
+    if (typeof value.report !== 'string' || value.report.length > MAX_STORED_INPUT) return null
+    if (!Array.isArray(value.rows) || value.rows.length > 5000 || !value.rows.every(isStoredRow)) return null
+    const run: StoredBulkRun = { report: value.report, rows: value.rows }
+    if (typeof value.input === 'string' && value.input.length <= MAX_STORED_INPUT) run.input = value.input
+    if (typeof value.lessonId === 'string' && value.lessonId.length <= 64) run.lessonId = value.lessonId
+    if (value.paymentMode === 'center' || value.paymentMode === 'school') run.paymentMode = value.paymentMode
+    if (Array.isArray(value.overrides) && value.overrides.every(isStoredOverride)) {
+      run.overrides = value.overrides
+    }
+    return run
+  }
+  let lastBulkRun: StoredBulkRun | null = null
   let bulkAnalysisToken = 0
   let bulkPayMode: PaymentMode = 'center'
   // Walk-in registration preview (names with no matching code)
@@ -1111,7 +1813,7 @@ export function mountShell(): void {
   const bulkPayOverrides = new Map<string, PaymentOverride>()
 
   function bulkSupported(): boolean {
-    return isAttendancePage()
+    return isAttendancePage() || (bulkExamMode && isExamPage())
   }
 
   /** Detect center vs school from the scan form data attribute. */
@@ -1165,23 +1867,23 @@ export function mountShell(): void {
     const amount = override?.amountPaid
     const needsAmount = status === 'partial' || status === 'discounted'
     const selectOpts = ([
-      ['default', 'افتراضي الحصة'],
-      ['paid', 'كامل'],
-      ['partial', 'جزئي'],
-      ['discounted', 'مخفض/مجاني'],
-      ['forgotten', 'نسي/مؤجل'],
+      ['default', t('data.payment.default')],
+      ['paid', t('data.payment.paid')],
+      ['partial', t('data.payment.partial')],
+      ['discounted', t('data.payment.discounted')],
+      ['forgotten', t('data.payment.forgotten')],
     ] as const).map(([val, lbl]) =>
-      `<option value="${val}" ${status === val ? 'selected' : ''}>${lbl}</option>`
+      `<option value="${val}" ${status === val ? 'selected' : ''}>${escapeBulk(lbl)}</option>`
     ).join('')
     return `<div class="bulk-inline-pay" data-inline-pay-code="${escapeBulk(key)}">
       <label class="bulk-inline-pay-field">
-        <span>الدفع</span>
+        <span>${t('ui.bulk.attendance.paymentLabel')}</span>
         <select class="bulk-pay-select" data-inline-pay-status="${escapeBulk(key)}">${selectOpts}</select>
       </label>
       <label class="bulk-inline-pay-field" ${needsAmount ? '' : 'hidden'} data-inline-pay-amount-wrap="${escapeBulk(key)}">
-        <span>المبلغ</span>
+        <span>${t('ui.bulk.attendance.amountLabel')}</span>
         <input type="number" class="bulk-pay-amount" data-inline-pay-amount="${escapeBulk(key)}"
-          placeholder="المبلغ" min="0" step="0.01" value="${amount != null ? escapeBulk(String(amount)) : ''}" />
+          placeholder="${t('ui.bulk.attendance.amountLabel')}" min="0" step="0.01" value="${amount != null ? escapeBulk(String(amount)) : ''}" />
       </label>
     </div>`
   }
@@ -1197,27 +1899,37 @@ export function mountShell(): void {
     })[char] ?? char)
   }
 
+  function paymentStatusLabel(status: PaymentStatus): string {
+    const keys: Record<PaymentStatus, Parameters<typeof t>[0]> = {
+      paid: 'data.payment.paid',
+      partial: 'data.payment.partial',
+      discounted: 'data.payment.discounted',
+      forgotten: 'data.payment.forgotten',
+    }
+    return t(keys[status])
+  }
+
   function renderBulkLog(): void {
     bulkLogCount.textContent = String(bulkLogRows.length)
     if (!bulkLogRows.length) {
-      bulkLog.innerHTML = `<div class="history-empty">لا يوجد تنفيذ بعد.</div>`
+      bulkLog.innerHTML = `<div class="history-empty">${t('ui.common.logEmpty')}</div>`
       return
     }
     bulkLog.innerHTML = bulkLogRows.slice().reverse().map((row) => {
       const statusLabel: Record<BulkRowResult['status'], string> = {
-        created: 'تم التسجيل',
-        duplicate: 'موجود بالفعل',
-        'skipped-known': 'متخطى (مسجّل)',
-        timeout: 'انتهت المهلة',
-        error: 'خطأ',
-        stopped: 'متوقف',
+        created: t('ui.bulk.attendance.logStatusCreated'),
+        duplicate: t('ui.bulk.attendance.logStatusDuplicate'),
+        'skipped-known': t('ui.bulk.attendance.logStatusSkipped'),
+        timeout: t('ui.bulk.attendance.logStatusTimeout'),
+        error: t('ui.common.error'),
+        stopped: t('ui.common.stopped'),
       }
       const cls = row.status === 'created' ? 'ok'
         : row.status === 'duplicate' || row.status === 'skipped-known' ? 'warn'
         : 'err'
       const label = row.label ? `${escapeBulk(row.label)} · ` : ''
       const detail = row.recordId ? ` · #${escapeBulk(row.recordId)}` : ''
-      const http = row.debug?.response ? ` · HTTP ${row.debug.response.status}` : ''
+      const http = row.debug?.response ? ` · HTTP ${escapeBulk(String(row.debug.response.status))}` : ''
       const msg = row.message ? ` — ${escapeBulk(row.message)}` : ''
       const hover = row.debug ? ` title="${escapeBulk(JSON.stringify(row.debug))}"` : ''
       return `<div class="bulk-log-item ${cls}"${hover}>
@@ -1234,22 +1946,30 @@ export function mountShell(): void {
   }
 
   function saveLastBulkRun(): void {
-    try {
-      ;(unsafeWindow ?? window).sessionStorage?.setItem(BULK_LAST_RUN_KEY, JSON.stringify({
-        report: bulkDiagnosticReport,
-        rows: bulkLogRows,
-      } satisfies StoredBulkRun))
-    } catch {
-      // sessionStorage can be unavailable; the in-memory report still works.
+    const snapshot: StoredBulkRun = {
+      report: bulkDiagnosticReport,
+      rows: bulkLogRows,
+      input: bulkCodesInput.value,
+      lessonId: bulkLessonInput.value.trim(),
+      paymentMode: bulkPayMode,
+      overrides: Array.from(bulkPayOverrides.entries()),
     }
+    lastBulkRun = snapshot
+    try {
+      ;(unsafeWindow ?? window).sessionStorage?.setItem(BULK_LAST_RUN_KEY, JSON.stringify(snapshot))
+    } catch {
+      // sessionStorage can be unavailable; the in-memory snapshot still works.
+    }
+    updateBulkButtons()
   }
 
   function restoreLastBulkRun(): void {
     try {
       const raw = (unsafeWindow ?? window).sessionStorage?.getItem(BULK_LAST_RUN_KEY)
       if (!raw) return
-      const parsed = JSON.parse(raw) as StoredBulkRun
-      if (!parsed || typeof parsed.report !== 'string' || !Array.isArray(parsed.rows)) return
+      const parsed = parseStoredRun(JSON.parse(raw) as unknown)
+      if (!parsed) return
+      lastBulkRun = parsed
       bulkDiagnosticReport = parsed.report
       bulkLogRows = parsed.rows
       renderBulkLog()
@@ -1258,9 +1978,25 @@ export function mountShell(): void {
         parsed.rows.filter((row) => row.status === 'error' || row.status === 'timeout').length,
       )
       bulkDiagnostics.hidden = false
+      updateBulkButtons()
     } catch {
       // Ignore missing or malformed data from an older version.
     }
+  }
+
+  /** Unique, uppercase codes from failed rows — the only ones a retry may submit. */
+  function retryableCodes(run: StoredBulkRun | null): string[] {
+    if (!run) return []
+    const seen = new Set<string>()
+    const codes: string[] = []
+    for (const row of run.rows) {
+      if (row.status !== 'error' && row.status !== 'timeout') continue
+      const code = row.code.trim().toUpperCase()
+      if (!code || seen.has(code)) continue
+      seen.add(code)
+      codes.push(code)
+    }
+    return codes
   }
 
   function disarmBulk(reason?: string): void {
@@ -1281,15 +2017,20 @@ export function mountShell(): void {
     return result
   }
 
-  /** Same student can appear as a code and as a resolved name — submit them once. */
-  function executableEntries(): Array<{ code: string, label?: string }> {
+  function dedupeEntries(entries: Array<{ code: string, label?: string, exam?: ExamCheckinOptions }>): Array<{ code: string, label?: string, exam?: ExamCheckinOptions }> {
     const seen = new Set<string>()
-    return allExecutableEntries().filter((entry) => {
+    return entries.filter((entry) => {
       const code = entry.code.toUpperCase()
       if (seen.has(code)) return false
       seen.add(code)
       return true
     })
+  }
+
+  /** Same student can appear as a code and as a resolved name — submit them once. */
+  function executableEntries(): Array<{ code: string, label?: string, exam?: ExamCheckinOptions }> {
+    if (bulkExamMode && examStageVisible()) return examStageEntries()
+    return dedupeEntries(allExecutableEntries())
   }
 
   function duplicateEntryCount(): number {
@@ -1345,27 +2086,27 @@ export function mountShell(): void {
     return !walkInPageHidden(form)
   }
 
-  function waitForWalkInState(stateEl: HTMLElement, timeoutMs = 12000): Promise<string> {
+  function waitForWalkInState(stateEl: HTMLElement, timeoutMs = 12000): Promise<{ text: string; timedOut: boolean }> {
     const initial = (stateEl.textContent || '').trim()
     if (initial && !/جار|جرى|جاري|loading|processing/i.test(initial)) {
-      return Promise.resolve(initial)
+      return Promise.resolve({ text: initial, timedOut: false })
     }
     return new Promise((resolve) => {
       let done = false
-      const finish = (text: string): void => {
+      const finish = (text: string, timedOut: boolean): void => {
         if (done) return
         done = true
         observer.disconnect()
         window.clearTimeout(timer)
-        resolve(text)
+        resolve({ text, timedOut })
       }
       const read = (): string => (stateEl.textContent || '').trim()
       const observer = new MutationObserver(() => {
         const text = read()
-        if (text && !/جار|جرى|جاري|loading|processing/i.test(text)) finish(text)
+        if (text && !/جار|جرى|جاري|loading|processing/i.test(text)) finish(text, false)
       })
       observer.observe(stateEl, { childList: true, subtree: true, characterData: true })
-      const timer = window.setTimeout(() => finish(read() || 'انتهى الإرسال — راجع الصفحة.'), timeoutMs)
+      const timer = window.setTimeout(() => finish(read() || t('ui.bulk.attendance.submitTimeout'), true), timeoutMs)
     })
   }
 
@@ -1379,11 +2120,11 @@ export function mountShell(): void {
     const addBtn = document.getElementById('addWalkInRow') as HTMLButtonElement | null
     const stateEl = document.getElementById('walkInState') as HTMLElement | null
     if (!form || !rowsBox || !addBtn || !stateEl) {
-      toast({ title: 'النموذج غير موجود', description: 'افتح لوحة «طلاب جدد بدون كارت» في صفحة الحضور أولًا.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.noFormTitle'), description: t('ui.bulk.attendance.noFormDesc'), variant: 'warning' })
       return
     }
     if (!ensureWalkInFormVisible(form)) {
-      toast({ title: 'اللوحة مخفية', description: 'افتح لوحة «طلاب جدد بدون كارت» يدويًا ثم حاول مجددًا.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.panelHiddenTitle'), description: t('ui.bulk.attendance.panelHiddenDesc'), variant: 'warning' })
       return
     }
 
@@ -1406,7 +2147,7 @@ export function mountShell(): void {
 
     const targets = pageRows().slice(0, rows.length)
     if (targets.length !== rows.length) {
-      toast({ title: 'تعذّر تجهيز النموذج', description: 'لم يتمكن تمبرينا من إضافة عدد الصفوف المطلوب.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.prepareFailedTitle'), description: t('ui.bulk.attendance.prepareFailedDesc'), variant: 'warning' })
       return
     }
 
@@ -1430,15 +2171,25 @@ export function mountShell(): void {
     stateEl.textContent = ''
     const submitBtn = form.querySelector<HTMLButtonElement>('button[type="submit"]')
     if (!submitBtn) {
-      toast({ title: 'تعذّر الإرسال', description: 'زر «تسجيل الطلاب والتحصيل» غير موجود.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.submitFailedTitle'), description: t('ui.bulk.attendance.submitFailedDesc'), variant: 'warning' })
       return
     }
     submitBtn.click()
-    const stateText = await waitForWalkInState(stateEl)
+    const { text: stateText, timedOut } = await waitForWalkInState(stateEl)
+
+    if (timedOut) {
+      toast({
+        title: t('ui.bulk.attendance.walkInUnverifiedTitle'),
+        description: t('ui.bulk.attendance.walkInUnverifiedDesc'),
+        variant: 'warning',
+        duration: 12000,
+      })
+      return
+    }
 
     const failed = /خطأ|فشل|تعذّر|تعذر|غير صالح|لم يتم|لم تُسجّل|لم تسجل|error|failed/i.test(stateText)
     if (failed) {
-      toast({ title: 'تعذّر تسجيل الطلاب الجدد', description: stateText, variant: 'error', duration: 9000 })
+      toast({ title: t('ui.bulk.attendance.registerFailedTitle'), description: stateText, variant: 'error', duration: 9000 })
       return
     }
 
@@ -1450,7 +2201,7 @@ export function mountShell(): void {
         : item)
       appendBulkRow({
         code: name,
-        label: 'طالب جديد بدون كارت',
+        label: t('ui.bulk.attendance.walkInLogLabel'),
         status: 'created',
         message: stateText,
         at: now,
@@ -1460,8 +2211,8 @@ export function mountShell(): void {
     bulkArmed = false
     renderBulkAnalysis()
     toast({
-      title: 'تم تسجيل الطلاب الجدد',
-      description: `${rows.length} طالب — ${stateText}. لا يمكن التراجع عنها، وقد استُبعدت من دفعة الحضور.`,
+      title: t('ui.bulk.attendance.walkInRegisteredTitle'),
+      description: t('ui.bulk.attendance.walkInRegisteredDesc', { p0: rows.length, p1: stateText }),
       variant: 'applied',
       duration: 9000,
     })
@@ -1469,6 +2220,8 @@ export function mountShell(): void {
 
   function readyToArm(): boolean {
     if (!bulkParsed) return false
+    if (bulkExamMode && !examTargetAllowed('exam-attendance', bulkCodesInput.value)) return false
+    if (bulkExamMode && examStageVisible() && examStageEntries().length === 0) return false
     if (bulkResolving) return false
     const exec = executableEntries()
     if (!exec.length) return false
@@ -1486,7 +2239,12 @@ export function mountShell(): void {
     const decidedNames = nameRows.filter((row) =>
       row.status === 'resolved' || row.status === 'walk-in')
     const codeItems = (bulkPayMode === 'school' && bulkParsed) ? bulkParsed.codes : []
-    if (!nameRows.length && !codeItems.length) {
+    // In exam attendance the staged students replace the separate stage table
+    // after preview and use the same review-item markup as normal attendance.
+    const examReview = bulkExamMode && examStageVisible() && bulkParsed
+      ? renderExamStageReview(examStage, examStageLabels(), { addDisabled: bulkRunning })
+      : ''
+    if (!examReview && !nameRows.length && !codeItems.length) {
       bulkResolveBox.hidden = true
       bulkResolveBox.innerHTML = ''
       return
@@ -1494,15 +2252,15 @@ export function mountShell(): void {
 
     const renderNameRow = (row: NameRow): string => {
       const statusText: Record<NameRow['status'], string> = {
-        ready: 'جاهز',
-        resolved: row.studentName ? `تم التعرف: ${row.studentName}${row.code ? ` (${row.code})` : ''}` : 'تم التعرف',
-        ambiguous: 'الاسم غامض أو مشترك — اختر الطالب الصحيح',
-        'not-found': 'لم يتم العثور على الاسم',
-        'too-many': 'نتائج كثيرة جدًا',
-        dropped: 'تم التجاهل — ستدخله يدويًا',
-        'walk-in': row.message ? `تم تسجيله طالبًا جديدًا — ${row.message}` : 'تم تسجيله طالبًا جديدًا بدون كارت',
-        loading: 'جارٍ البحث…',
-        error: 'تعذّر البحث',
+        ready: t('ui.common.ready'),
+        resolved: row.studentName ? t('ui.bulk.attendance.identifiedAs', { p0: `${row.studentName}${row.code ? ` (${row.code})` : ''}` }) : t('ui.bulk.attendance.identified'),
+        ambiguous: t('ui.bulk.attendance.ambiguousName'),
+        'not-found': t('ui.bulk.attendance.nameNotFound'),
+        'too-many': t('ui.common.tooMany'),
+        dropped: t('ui.bulk.attendance.droppedManual'),
+        'walk-in': row.message ? t('ui.bulk.attendance.walkInStatus', { p0: row.message }) : t('ui.bulk.attendance.walkInStatusShort'),
+        loading: t('ui.common.searching'),
+        error: t('ui.bulk.attendance.searchFailed'),
       }
       const cls = row.status === 'resolved' || row.status === 'walk-in' ? 'ok'
         : row.status === 'dropped' ? 'drop'
@@ -1521,41 +2279,41 @@ export function mountShell(): void {
             data-resolve-action="choose" data-key="${escapeBulk(row.key)}"
             data-id="${escapeBulk(c.id)}" data-code="${escapeBulk(c.code)}" data-name="${escapeBulk(c.name)}">
             <span class="bulk-choice-label">
-              ${chosen ? '<span class="bulk-choice-mark">✓ المُختار — سيُسجَّل في الحضور</span>' : ''}
-              <span>${escapeBulk(c.name || 'طالب')}</span>
+              ${chosen ? `<span class="bulk-choice-mark">${t('ui.bulk.attendance.chosenMark')}</span>` : ''}
+              <span>${escapeBulk(c.name || t('ui.common.student'))}</span>
             </span>
-            <small>${escapeBulk(c.code || 'بدون كود')}</small>
+            <small>${escapeBulk(c.code || t('ui.common.noCode'))}</small>
           </button>`
         }
         if (row.status === 'resolved') {
           const chosen = list.filter(isChosen)
           const others = list.filter((c) => !isChosen(c))
           if (chosen.length) {
-            choicesHtml += `<div class="bulk-resolve-chosen-note">الطالب المُختار الذي سيُسجَّل:</div>
+            choicesHtml += `<div class="bulk-resolve-chosen-note">${t('ui.bulk.attendance.chosenNote')}</div>
               <div class="bulk-resolve-choices chosen-group">${chosen.map(choiceButton).join('')}</div>`
           }
           if (others.length) {
-            choicesHtml += `<div class="bulk-resolve-chosen-note muted">نتائج أخرى — غير مختارة (اضغط لتبديل الاختيار):</div>
+            choicesHtml += `<div class="bulk-resolve-chosen-note muted">${t('ui.bulk.attendance.otherResultsNote')}</div>
               <div class="bulk-resolve-choices other-group">${others.map(choiceButton).join('')}</div>`
           }
         } else {
           choicesHtml = `<div class="bulk-resolve-choices">${list.map(choiceButton).join('')}</div>`
         }
         if (row.candidates.length > 12) {
-          choicesHtml += `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>`
+          choicesHtml += `<div class="bulk-note-inline">${t('ui.common.moreResults', { p0: row.candidates.length - 12 })}</div>`
         }
       }
 
       const editHtml = row.status === 'dropped' || row.status === 'walk-in' ? '' : `<div class="bulk-inline-edit" ${row.status === 'resolved' ? 'hidden' : ''}>
-          <input type="text" class="bulk-input" data-resolve-edit="${escapeBulk(row.key)}" value="${escapeBulk(row.query)}" placeholder="عدّل الاسم ثم أعد البحث" />
-          <button type="button" class="bulk-mini-btn" data-resolve-action="research" data-key="${escapeBulk(row.key)}">إعادة بحث</button>
+          <input type="text" class="bulk-input" data-resolve-edit="${escapeBulk(row.key)}" value="${escapeBulk(row.query)}" placeholder="${t('ui.bulk.attendance.editPlaceholder')}" />
+          <button type="button" class="bulk-mini-btn" data-resolve-action="research" data-key="${escapeBulk(row.key)}">${t('ui.bulk.attendance.research')}</button>
         </div>`
 
       const actions = row.status === 'dropped' || row.status === 'walk-in'
-        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-resolve-action="undrop" data-key="${escapeBulk(row.key)}">استرجاع</button></div>`
+        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-resolve-action="undrop" data-key="${escapeBulk(row.key)}">${t('ui.common.restore')}</button></div>`
         : `<div class="bulk-resolve-actions">
-            ${row.status === 'resolved' ? `<button type="button" class="bulk-mini-btn" data-resolve-action="change" data-key="${escapeBulk(row.key)}">تغيير</button>` : ''}
-            <button type="button" class="bulk-mini-btn" data-resolve-action="drop" data-key="${escapeBulk(row.key)}">تجاهل (يدويًا)</button>
+            ${row.status === 'resolved' ? `<button type="button" class="bulk-mini-btn" data-resolve-action="change" data-key="${escapeBulk(row.key)}">${t('ui.common.change')}</button>` : ''}
+            <button type="button" class="bulk-mini-btn" data-resolve-action="drop" data-key="${escapeBulk(row.key)}">${t('ui.common.ignoreManual')}</button>
           </div>`
 
       const reason = row.message && row.status !== 'resolved' ? `<div class="bulk-resolve-reason">${escapeBulk(row.message)}</div>` : ''
@@ -1581,29 +2339,29 @@ export function mountShell(): void {
       html += `<div class="bulk-undecided-section">
         <div class="bulk-undecided-head">
           <div class="bulk-undecided-title">
-            <strong>طلاب غير محلولين / مُتجاهَلين</strong>
+            <strong>${t('ui.bulk.attendance.unresolvedSectionTitle')}</strong>
             <span class="feature-badge busy">${undecided.length}</span>
           </div>
           <div class="bulk-resolve-actions">
-            <button type="button" class="bulk-mini-btn" data-bulk-copy-undecided data-copy-text="${escapeBulk(undecidedText)}">نسخ</button>
-            <button type="button" class="bulk-mini-btn" data-resolve-action="drop-all">تجاهل الكل</button>
-            <button type="button" class="bulk-mini-btn" data-walkin-toggle aria-expanded="${walkInPreviewOpen}">تسجيل بدون كود</button>
+            <button type="button" class="bulk-mini-btn" data-bulk-copy-undecided data-copy-text="${escapeBulk(undecidedText)}">${t('ui.common.copy')}</button>
+            <button type="button" class="bulk-mini-btn" data-resolve-action="drop-all">${t('ui.bulk.attendance.dropAll')}</button>
+            <button type="button" class="bulk-mini-btn" data-walkin-toggle aria-expanded="${walkInPreviewOpen}">${t('ui.bulk.attendance.walkInToggle')}</button>
           </div>
         </div>
-        <div class="bulk-note-inline">التجاهل يُبقي الاسم هنا ويُخرجه فقط من دفعة الحضور — يمكنك نسخ القائمة كاملة للتعامل معها يدويًا، أو تسجيل الأسماء كطلاب جدد عبر نموذج الصفحة.</div>
+        <div class="bulk-note-inline">${t('ui.bulk.attendance.ignoreNote')}</div>
         <div class="bulk-walkin-panel" data-walkin-panel ${walkInPreviewOpen ? '' : 'hidden'}>
-          <div class="bulk-warn">سيتم إنشاء طلاب جدد وتسجيل التحصيل في حصة المدرسة عبر نموذج الصفحة. هذه التسجيلات <strong>لا يمكن التراجع عنها</strong>، وستُستبعد من دفعة الحضور الحالية. المبلغ الافتراضي 45 ويمكن تعديله لكل طالب.</div>
+          <div class="bulk-warn">${t('ui.bulk.attendance.walkInWarn')}</div>
           <div class="bulk-walkin-rows">
             ${undecided.map((row) => `<div class="bulk-walkin-row">
               <span title="${escapeBulk(row.raw)}">${escapeBulk(row.query || row.raw)}</span>
               <input type="number" class="bulk-input" inputmode="decimal" min="0" max="999999.99" step="0.01"
                 data-walkin-amount-key="${escapeBulk(row.key)}" value="${formatWalkInAmount(walkInAmountFor(row))}"
-                aria-label="المبلغ المدفوع لـ ${escapeBulk(row.query || row.raw)}" />
+                aria-label="${t('ui.bulk.attendance.walkInAmountAria', { p0: escapeBulk(row.query || row.raw) })}" />
             </div>`).join('')}
           </div>
           <div class="bulk-resolve-actions">
-            <button type="button" class="bulk-mini-btn" data-walkin-confirm>تسجيل الطلاب والتحصيل</button>
-            <button type="button" class="bulk-mini-btn" data-walkin-cancel>إلغاء</button>
+            <button type="button" class="bulk-mini-btn" data-walkin-confirm>${t('ui.bulk.attendance.registerAndCollect')}</button>
+            <button type="button" class="bulk-mini-btn" data-walkin-cancel>${t('ui.bulk.attendance.cancel')}</button>
           </div>
         </div>
         ${undecided.map(renderNameRow).join('')}
@@ -1615,7 +2373,7 @@ export function mountShell(): void {
       html += codeItems.map((item) => {
         const pay = renderInlinePaymentControls(item.code)
         const paymentNote = item.payment
-          ? `<div class="bulk-note-inline">من الإدخال: ${escapeBulk(item.payment.status === 'paid' ? 'كامل' : item.payment.status === 'partial' ? 'جزئي' : item.payment.status === 'discounted' ? 'مخفض/مجاني' : 'نسي الفلوس')}${item.payment.amountPaid != null ? ` — ${escapeBulk(String(item.payment.amountPaid))}` : ''}</div>`
+          ? `<div class="bulk-note-inline">${t('ui.bulk.attendance.fromInput', { p0: `${escapeBulk(paymentStatusLabel(item.payment.status))}${item.payment.amountPaid != null ? ` — ${escapeBulk(String(item.payment.amountPaid))}` : ''}` })}</div>`
           : ''
         return `<div class="bulk-resolve-item ok" data-code-item="${escapeBulk(item.code)}">
           <div class="bulk-resolve-head">
@@ -1634,7 +2392,7 @@ export function mountShell(): void {
     }
 
     bulkResolveBox.hidden = false
-    bulkResolveBox.innerHTML = html
+    bulkResolveBox.innerHTML = `${examReview}${html}`
   }
 
   function updateBulkButtons(): void {
@@ -1647,19 +2405,21 @@ export function mountShell(): void {
     bulkArmBtn.disabled = !canArm
     bulkRunBtn.disabled = !canRun
     bulkStopBtn.disabled = !bulkRunning
+    bulkRetryBtn.disabled = !(supported && !bulkRunning && !bulkResolving
+      && !!lastBulkRun?.input && retryableCodes(lastBulkRun).length > 0)
 
     if (!supported) {
-      setBulkBadge('خارج صفحة الحضور', 'off')
+      setBulkBadge(t('ui.bulk.attendance.notOnPage'), 'off')
     } else if (bulkRunning) {
-      setBulkBadge('جارٍ التنفيذ', 'busy')
+      setBulkBadge(t('ui.common.running'), 'busy')
     } else if (bulkResolving) {
-      setBulkBadge('جارٍ التحليل', 'busy')
+      setBulkBadge(t('ui.bulk.attendance.analyzing'), 'busy')
     } else if (bulkArmed) {
-      setBulkBadge('مسلّح', 'on')
+      setBulkBadge(t('ui.common.armed'), 'on')
     } else if (unresolvedNameRows().length) {
-      setBulkBadge('يتطلب قرارًا', 'busy')
+      setBulkBadge(t('ui.common.needsDecision'), 'busy')
     } else {
-      setBulkBadge('جاهز', 'off')
+      setBulkBadge(t('ui.common.ready'), 'off')
     }
   }
 
@@ -1671,12 +2431,12 @@ export function mountShell(): void {
 
   function renderBulkAnalysisSummary(): void {
     if (!bulkParsed) {
-      bulkPreviewBox.textContent = 'لم تتم المعاينة بعد.'
+      bulkPreviewBox.textContent = t('ui.common.previewEmpty')
       return
     }
 
     if (!bulkSupported()) {
-      bulkPreviewBox.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/attendance/scan</code> أولًا.</div>`
+      bulkPreviewBox.innerHTML = `<div class="bulk-warn">${t('ui.bulk.attendance.openScanPage')}</div>`
       return
     }
 
@@ -1691,52 +2451,53 @@ export function mountShell(): void {
 
     const parts: string[] = []
     parts.push(`<div class="bulk-preview-grid">
-      <div><strong>الحصة المستهدفة</strong><span>${escapeHtml(lessonId ?? 'غير محددة')}</span></div>
-      <div><strong>الحصة المفتوحة</strong><span>${escapeHtml(pageLessonId ?? 'غير معروفة')}</span></div>
-      <div><strong>حقل الإدخال</strong><span dir="ltr">${escapeHtml(scan?.inputSelector ?? 'غير معروف')}</span></div>
-      <div><strong>أكواد مباشرة</strong><span>${bulkParsed.codes.length}</span></div>
-      <div><strong>أسماء (تم التعرف)</strong><span>${resolvedNames}/${bulkParsed.names.length}</span></div>
-      <div><strong>تحتاج قرارًا</strong><span>${unresolved.length}</span></div>
-      <div><strong>تم تجاهلها</strong><span>${dropped}</span></div>
-      <div><strong>سُجّلت كطلاب جدد</strong><span>${walkInCount}</span></div>
-      <div><strong>جاهزة للإرسال</strong><span>${exec.length}</span></div>
-      <div><strong>مكررة</strong><span>${bulkParsed.duplicates.length + duplicateEntryCount()}</span></div>
-      <div><strong>نوع الحصة</strong><span>${bulkPayMode === 'school' ? 'مدرسة' : 'سنتر'}</span></div>
-      <div><strong>غير صالحة</strong><span>${bulkParsed.invalid.length}</span></div>
+      <div><strong>${t('ui.bulk.attendance.targetLesson')}</strong><span>${escapeHtml(lessonId ?? t('ui.bulk.attendance.unknownLesson'))}</span></div>
+      <div><strong>${t('ui.bulk.attendance.openLesson')}</strong><span>${escapeHtml(pageLessonId ?? t('ui.bulk.attendance.unknownPageLesson'))}</span></div>
+      <div><strong>${t('ui.bulk.attendance.inputField')}</strong><span dir="ltr">${escapeHtml(scan?.inputSelector ?? t('ui.bulk.attendance.unknownSelector'))}</span></div>
+      <div><strong>${t('ui.bulk.attendance.directCodes')}</strong><span>${bulkParsed.codes.length}</span></div>
+      <div><strong>${t('ui.bulk.attendance.recognizedNames')}</strong><span>${resolvedNames}/${bulkParsed.names.length}</span></div>
+      <div><strong>${t('ui.bulk.attendance.needsDecision')}</strong><span>${unresolved.length}</span></div>
+      <div><strong>${t('ui.bulk.attendance.ignored')}</strong><span>${dropped}</span></div>
+      <div><strong>${t('ui.bulk.attendance.walkIns')}</strong><span>${walkInCount}</span></div>
+      <div><strong>${t('ui.bulk.attendance.readyToSend')}</strong><span>${exec.length}</span></div>
+      <div><strong>${t('ui.bulk.attendance.duplicates')}</strong><span>${bulkParsed.duplicates.length + duplicateEntryCount()}</span></div>
+      <div><strong>${t('ui.bulk.attendance.modeLabel')}</strong><span>${bulkPayMode === 'school' ? t('ui.bulk.attendance.modeSchool') : t('ui.bulk.attendance.modeCenter')}</span></div>
+      <div><strong>${t('ui.bulk.attendance.invalid')}</strong><span>${bulkParsed.invalid.length}</span></div>
     </div>`)
 
     if (!scan) {
-      parts.push(`<div class="bulk-warn">تعذّر العثور على نموذج الحضور أو حقل الإدخال.</div>`)
+      parts.push(`<div class="bulk-warn">${t('ui.bulk.attendance.formNotFound')}</div>`)
     }
     if (pageLessonId && lessonId && String(lessonId) !== String(pageLessonId)) {
-      parts.push(`<div class="bulk-warn">رقم الحصة المدخل (${escapeHtml(lessonId)}) يختلف عن الحصة المفتوحة (${escapeHtml(pageLessonId)}). افتح الحصة المطلوبة أولًا قبل التنفيذ.</div>`)
+      parts.push(`<div class="bulk-warn">${t('ui.bulk.attendance.lessonMismatch', { p0: escapeHtml(lessonId), p1: escapeHtml(pageLessonId) })}</div>`)
     }
     if (bulkParsed.invalid.length) {
-      parts.push(`<div class="bulk-warn">قيم غير صالحة سيتم تجاهلها: ${bulkParsed.invalid.slice(0, 12).map(escapeHtml).join('، ')}${bulkParsed.invalid.length > 12 ? '…' : ''}</div>`)
+      parts.push(`<div class="bulk-warn">${t('ui.bulk.attendance.invalidValues', { p0: bulkParsed.invalid.slice(0, 12).map(escapeHtml).join(listSeparator()), p1: bulkParsed.invalid.length > 12 ? '…' : '' })}</div>`)
     }
     if (bulkParsed.duplicates.length) {
-      parts.push(`<div class="bulk-note-inline">أكواد مكررة أُزيلت: ${bulkParsed.duplicates.slice(0, 12).map(escapeHtml).join('، ')}${bulkParsed.duplicates.length > 12 ? '…' : ''}</div>`)
+      parts.push(`<div class="bulk-note-inline">${t('ui.bulk.attendance.removedDuplicates', { p0: bulkParsed.duplicates.slice(0, 12).map(escapeHtml).join(listSeparator()), p1: bulkParsed.duplicates.length > 12 ? '…' : '' })}</div>`)
     }
     if (unresolved.length) {
-      parts.push(`<div class="bulk-warn">يوجد ${unresolved.length} اسم يحتاج قرارًا (اختيار/تعديل/تجاهل) قبل التسليح.</div>`)
+      parts.push(`<div class="bulk-warn">${t('ui.bulk.attendance.unresolvedWarning', { p0: unresolved.length })}</div>`)
     }
     if (!undoRedo.enabled) {
-      parts.push(`<div class="bulk-warn">ميزة التراجع متوقفة؛ فعّلها أولًا ليتم تسجيل الدفعة كتراجع واحد.</div>`)
+      parts.push(`<div class="bulk-warn">${t('ui.bulk.attendance.undoDisabledWarning')}</div>`)
     }
     if (!exec.length && !bulkResolving) {
-      parts.push(`<div class="bulk-warn">لا توجد عناصر جاهزة للإرسال.</div>`)
+      parts.push(`<div class="bulk-warn">${t('ui.bulk.attendance.noReadyEntries')}</div>`)
     }
     if (duplicateEntryCount()) {
-      parts.push(`<div class="bulk-note-inline">تم توحيد ${duplicateEntryCount()} طالب ظهر أكثر من مرة (كود + اسم مثلًا) — سيُرسل مرة واحدة.</div>`)
+      parts.push(`<div class="bulk-note-inline">${t('ui.bulk.attendance.mergedDuplicates', { p0: duplicateEntryCount() })}</div>`)
     }
     parts.push(bulkPayMode === 'school'
-      ? `<div class="bulk-note-inline">وضع المدرسة: يُرسل الدفع فقط لمن له بيان دفع صريح. بدون بيان يُترك الحضور على إعداد الحصة الافتراضي في المنصة. الصيغ: كود/اسم [، مبلغ] [، الحالة].</div>`
-      : `<div class="bulk-note-inline">وضع السنتر: يُستخدم نموذج المسح كما هو، وأي بيانات دفع في النص تُتجاهل. الأسماء تُطابق ضمن طلاب الحصة المفتوحة.</div>`)
+      ? `<div class="bulk-note-inline">${t('ui.bulk.attendance.schoolMode')}</div>`
+      : `<div class="bulk-note-inline">${t('ui.bulk.attendance.centerMode')}</div>`)
 
     bulkPreviewBox.innerHTML = parts.join('')
   }
 
   function renderBulkAnalysis(): void {
+    updateExamStagePanel()
     renderBulkAnalysisSummary()
     renderBulkResolve()
     updateBulkButtons()
@@ -1750,9 +2511,10 @@ export function mountShell(): void {
     bulkNameRows = []
     bulkArmed = false
     bulkPayOverrides.clear()
-    bulkPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة والتحليل قبل التنفيذ.'
+    bulkPreviewBox.textContent = t('ui.common.dataEdited')
     bulkResolveBox.hidden = true
     bulkResolveBox.innerHTML = ''
+    updateExamStagePanel()
     updateBulkButtons()
   }
 
@@ -1761,7 +2523,20 @@ export function mountShell(): void {
       bulkParsed = null
       bulkNameRows = []
       renderBulkAnalysis()
-      disarmBulk('غير متاح')
+      disarmBulk(t('ui.common.unavailable'))
+      return
+    }
+
+    if (bulkExamMode && !examTargetAllowed('exam-attendance', bulkCodesInput.value)) {
+      bulkAnalysisToken++
+      bulkParsed = null
+      bulkNameRows = []
+      bulkResolving = false
+      bulkPreviewBox.innerHTML = `<div class="bulk-warn">${t('ui.bulk.exam.guard')}</div>`
+      bulkResolveBox.hidden = true
+      bulkResolveBox.innerHTML = ''
+      disarmBulk(t('ui.common.unavailable'))
+      updateBulkButtons()
       return
     }
 
@@ -1775,12 +2550,15 @@ export function mountShell(): void {
       query: entry.query,
       status: lessonId ? 'loading' : 'error',
       candidates: [],
-      message: lessonId ? 'جارٍ البحث…' : 'حدد رقم الحصة أولًا.',
+      message: lessonId ? t('ui.common.searching') : t('ui.bulk.attendance.specifyLesson'),
       payment: entry.payment,
     }))
     bulkArmed = false
     bulkPayOverrides.clear()
     seedPaymentOverridesFromParsed()
+    if (bulkExamMode && examStageVisible()) {
+      syncExamStageFromEntries(dedupeEntries(allExecutableEntries()))
+    }
     bulkResolving = bulkNameRows.length > 0 && !!lessonId
     renderBulkAnalysis()
 
@@ -1822,7 +2600,7 @@ export function mountShell(): void {
     if (index < 0) return
     const token = ++bulkAnalysisToken
     bulkArmed = false
-    bulkNameRows[index] = { ...bulkNameRows[index], query: nextQuery.trim() || bulkNameRows[index].query, status: 'loading', message: 'جارٍ البحث…' }
+    bulkNameRows[index] = { ...bulkNameRows[index], query: nextQuery.trim() || bulkNameRows[index].query, status: 'loading', message: t('ui.common.searching') }
     renderBulkAnalysis()
     const payment = bulkNameRows[index].payment
     const resolved = await resolveNameEntry(bulkNameRows[index], lessonId)
@@ -1837,13 +2615,63 @@ export function mountShell(): void {
     renderBulkAnalysis()
   }
 
+  /**
+   * Reloads failed codes from the last run into the input and leaves the batch
+   * disarmed. Submission still goes through the normal preview → arm → run path.
+   */
+  async function retryFailedBulk(): Promise<void> {
+    if (bulkRunning || bulkResolving || !bulkSupported()) return
+    const snapshot = lastBulkRun
+    if (!snapshot || typeof snapshot.input !== 'string') return
+    const codes = retryableCodes(snapshot)
+    if (!codes.length) return
+
+    const retryInput = codes.join('\n')
+    bulkCodesInput.value = retryInput
+    if (snapshot.lessonId) {
+      bulkLessonInput.value = snapshot.lessonId
+      bulkLessonTouched = true
+    }
+    applyPaymentMode(snapshot.paymentMode ?? detectPagePaymentMode())
+    updateBulkInputPlaceholder()
+
+    // analyzeBulkInput() clears + reseeds overrides, so replay stored ones after it.
+    await analyzeBulkInput()
+    if (bulkCodesInput.value !== retryInput) return // input edited while analyzing
+    const failedSet = new Set(codes)
+    bulkPayOverrides.clear()
+    for (const [storedCode, override] of snapshot.overrides ?? []) {
+      const code = storedCode.trim().toUpperCase()
+      if (!failedSet.has(code)) continue
+      bulkPayOverrides.set(code, { ...override, studentCode: code })
+    }
+
+    disarmBulk()
+    renderBulkAnalysis()
+    const hadTimeout = snapshot.rows.some(
+      (row) => row.status === 'timeout' && failedSet.has(row.code.trim().toUpperCase()),
+    )
+    toast({
+      title: t('ui.bulk.attendance.retryLoadedTitle'),
+      description: t('ui.bulk.attendance.retryLoadedDesc', { p0: codes.length })
+        + (hadTimeout ? t('ui.bulk.attendance.retryTimeoutHint') : ''),
+      variant: 'info',
+      duration: 8000,
+    })
+  }
+
   async function executeBulk(): Promise<void> {
+    bulkRan = false
     if (bulkRunning || !bulkArmed || !bulkParsed) return
     if (!bulkSupported()) return
+    if (bulkExamMode && !examTargetAllowed('exam-attendance', bulkCodesInput.value)) {
+      toast({ title: t('ui.bulk.exam.title', { p0: t('ui.bulk.menu.examAttendance.title') }), description: t('ui.bulk.exam.guard'), variant: 'warning' })
+      return
+    }
 
-    const scan = detectScanForm()
+    const scan = detectScanForm(bulkExamMode)
     if (!scan) {
-      toast({ title: 'تعذّر التنفيذ', description: 'لم يُعثر على نموذج الحضور.', variant: 'error' })
+      toast({ title: t('ui.bulk.attendance.executeFailedTitle'), description: t('ui.bulk.attendance.executeFailedDesc'), variant: 'error' })
       return
     }
 
@@ -1851,8 +2679,8 @@ export function mountShell(): void {
     const pageLesson = scan.lessonId ?? currentLessonIdFromPage() ?? ''
     if (targetLesson && pageLesson && String(targetLesson) !== String(pageLesson)) {
       toast({
-        title: 'الحصة غير متطابقة',
-        description: `افتح الحصة رقم ${targetLesson} أولًا ثم أعد المحاولة.`,
+        title: t('ui.bulk.attendance.lessonMismatchTitle'),
+        description: t('ui.bulk.attendance.lessonMismatchToast', { p0: targetLesson }),
         variant: 'warning',
         duration: 7000,
       })
@@ -1860,7 +2688,7 @@ export function mountShell(): void {
     }
 
     if (unresolvedNameRows().length) {
-      toast({ title: 'يوجد أسماء غير محلولة', description: 'اختر الطالب الصحيح أو عدّل الاسم أو تجاهله.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.unresolvedTitle'), description: t('ui.bulk.attendance.unresolvedDesc'), variant: 'warning' })
       return
     }
 
@@ -1876,8 +2704,8 @@ export function mountShell(): void {
       )
       if (missingAmount) {
         toast({
-          title: 'مبلغ غير مكتمل',
-          description: `أدخل المبلغ المدفوع للحالات الجزئية/المخفضة (كود ${missingAmount.studentCode}).`,
+          title: t('ui.bulk.attendance.missingAmountTitle'),
+          description: t('ui.bulk.attendance.missingAmountDesc', { p0: missingAmount.studentCode }),
           variant: 'warning',
         })
         return
@@ -1885,7 +2713,7 @@ export function mountShell(): void {
     }
 
     if (!undoRedo.enabled) {
-      toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء والتراجع معطل.', variant: 'warning' })
+      toast({ title: t('ui.menu.enableUndoTitle'), description: t('ui.bulk.attendance.enableUndoDesc'), variant: 'warning' })
       return
     }
 
@@ -1905,7 +2733,8 @@ export function mountShell(): void {
     disarmBulk()
     updateBulkButtons()
 
-    undoRedo.beginBatch('تسجيل حضور جماعي')
+    undoRedo.beginBatch(t('ui.bulk.attendance.batchTitle'))
+    bulkRan = true
     try {
       const summary = await runBulkAttendance({
         entries,
@@ -1914,6 +2743,7 @@ export function mountShell(): void {
         paymentMode: bulkPayMode,
         paymentOverrides,
         lessonId,
+        ...(bulkExamMode ? { target: 'exam' as const } : {}),
       })
 
       bulkDiagnosticReport = formatBulkDiagnosticReport(summary, entries)
@@ -1927,14 +2757,21 @@ export function mountShell(): void {
 
       const recordedBeforeCommit = undoRedo.batchCount
       const committed = undoRedo.commitBatch({
-        title: `تسجيل حضور جماعي (${summary.created})`,
-        detail: `تم ${summary.created} · موجود ${summary.duplicates} · متخطى ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}`,
+        title: t('ui.bulk.attendance.batchTitleCount', { p0: summary.created }),
+        detail: t('ui.bulk.attendance.batchDetail', { p0: summary.created, p1: summary.duplicates, p2: summary.skipped, p3: summary.failed, p4: summary.stopped ? t('ui.common.stoppedSuffix') : '' }),
       })
 
-      if (!committed && summary.created > 0) {
+      if (bulkExamMode && summary.created > 0) {
         toast({
-          title: 'اكتمل التنفيذ بدون سجل تراجع',
-          description: `لم يُسجَّل أي إجراء قابل للإلغاء (أُكّد ${summary.created} تسجيل، لكن السجل لم يحتوِ على إجراءات). استخدم تشخيص التراجع لعرض الطلبات المرصودة.`,
+          title: t('ui.bulk.exam.title', { p0: t('ui.bulk.menu.examAttendance.title') }),
+          description: t('ui.bulk.exam.attendanceWarning'),
+          variant: 'warning',
+          duration: 9000,
+        })
+      } else if (!committed && summary.created > 0) {
+        toast({
+          title: t('ui.bulk.attendance.noUndoTitle'),
+          description: t('ui.bulk.attendance.noUndoDesc', { p0: summary.created }),
           variant: 'warning',
           duration: 9000,
         })
@@ -1944,12 +2781,25 @@ export function mountShell(): void {
           debug: undoRedo.debug(),
         })
       } else if (summary.created > 0) {
-        const breakdown = `تم ${summary.created} · موجود ${summary.duplicates} · متخطى (مسجّل مسبقًا) ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}`
+        const breakdown = t('ui.bulk.attendance.summaryDetail', { p0: summary.created, p1: summary.duplicates, p2: summary.skipped, p3: summary.failed, p4: summary.stopped ? t('ui.common.stoppedSuffix') : '' })
+        // Handoff: only rows explicitly confirmed as created are offered for copy.
+        // Timed-out rows may have succeeded server-side, but are not claimed here.
+        const newCodes = summary.rows
+          .filter((row) => row.status === 'created')
+          .map((row) => row.code)
         toast({
-          title: 'اكتمل التسجيل الجماعي',
-          description: `${breakdown} — من ${entries.length} عنصر. ${summary.failed > 0 ? 'راجع «تقرير التشخيص» لمعرفة الخطأ بالضبط. ' : ''}يمكن التراجع عن الدفعة كاملة بـ Ctrl+Z.`,
+          title: t('ui.bulk.attendance.completedTitle'),
+          description: `${breakdown} ${t('ui.bulk.attendance.ofEntries', { p0: entries.length })} ${summary.failed > 0 ? t('ui.bulk.attendance.reviewReportHint') : ''}${t('ui.common.undoBatchHint')}`,
           variant: summary.failed > 0 ? 'warning' : 'applied',
           duration: 9000,
+          action: newCodes.length ? {
+            label: t('ui.bulk.attendance.copyNewCodes'),
+            onClick: () => { void copyPlainText(
+              newCodes.join('\n'),
+              t('ui.bulk.attendance.newCodesCopiedTitle'),
+              t('ui.bulk.attendance.newCodesCopiedDesc', { p0: newCodes.length }),
+            ) },
+          } : undefined,
         })
         console.info('[Tamperina] bulk attendance summary', breakdown, {
           entries: entries.length,
@@ -1957,15 +2807,15 @@ export function mountShell(): void {
         })
       } else if (summary.failed > 0 || summary.duplicates > 0 || summary.skipped > 0) {
         toast({
-          title: 'لم تُسجَّل عناصر جديدة',
-          description: `من ${entries.length}: موجود ${summary.duplicates} · متخطى (مسجّل مسبقًا) ${summary.skipped} · فشل ${summary.failed}${summary.stopped ? ' · متوقف' : ''}. راجع «تقرير التشخيص» للتفاصيل.`,
+          title: t('ui.bulk.attendance.nothingNewTitle'),
+          description: t('ui.bulk.attendance.nothingNewDesc', { p0: entries.length, p1: summary.duplicates, p2: summary.skipped, p3: summary.failed, p4: summary.stopped ? t('ui.common.stoppedSuffix') : '' }),
           variant: 'warning',
           duration: 9000,
         })
       } else {
         toast({
-          title: 'لا توجد سجلات جديدة',
-          description: 'جميع العناصر كانت مسجلة أو تم تخطيها.',
+          title: t('ui.bulk.attendance.noNewRecordsTitle'),
+          description: t('ui.bulk.attendance.noNewRecordsDesc'),
           variant: 'info',
         })
       }
@@ -1973,11 +2823,11 @@ export function mountShell(): void {
       renderBulkAnalysisSummary()
     } catch (error) {
       undoRedo.commitBatch({
-        title: `تسجيل حضور جماعي (${undoRedo.batchCount})`,
-        detail: 'انتهى التنفيذ بخطأ',
+        title: t('ui.bulk.attendance.batchTitleCount', { p0: undoRedo.batchCount }),
+        detail: t('ui.bulk.attendance.errorEnded'),
       })
       toast({
-        title: 'حدث خطأ أثناء التنفيذ',
+        title: t('ui.common.executionErrorTitle'),
         description: error instanceof Error ? error.message : String(error),
         variant: 'error',
       })
@@ -1994,9 +2844,9 @@ export function mountShell(): void {
   })
   bulkCopyDebugBtn.addEventListener('click', () => {
     void copyPlainText(
-      bulkDiagnosticReport || 'لا يوجد تقرير بعد — شغّل الدفعة أولًا.',
-      'تم نسخ تقرير التشخيص',
-      'الصق التقرير في رسالة المشكلة لتحديد السبب بالضبط.',
+      bulkDiagnosticReport || t('ui.bulk.attendance.noReportYet'),
+      t('ui.bulk.attendance.reportCopiedTitle'),
+      t('ui.bulk.attendance.reportCopiedDesc'),
     )
   })
   bulkCopyFailedBtn.addEventListener('click', () => {
@@ -2004,9 +2854,9 @@ export function mountShell(): void {
       .filter((row) => row.status === 'error' || row.status === 'timeout')
       .map((row) => row.code)
     void copyPlainText(
-      failedCodes.join('\n') || 'لا توجد أكواد فاشلة.',
-      'تم نسخ الأكواد الفاشلة',
-      `${failedCodes.length} كود — يمكن إعادة تحليلها منفردة.`,
+      failedCodes.join('\n') || t('ui.bulk.attendance.noFailedCodes'),
+      t('ui.bulk.attendance.failedCopiedTitle'),
+      t('ui.bulk.attendance.failedCopiedDesc', { p0: failedCodes.length }),
     )
   })
   bulkCopySkippedBtn.addEventListener('click', () => {
@@ -2015,22 +2865,23 @@ export function mountShell(): void {
     )
     const text = skippedRows.map((row) => `${row.code}${row.label ? `,${row.label}` : ''}`).join('\n')
     void copyPlainText(
-      text || 'لا توجد أكواد متخطاة.',
-      'تم نسخ الأكواد المتخطاة',
-      `${skippedRows.length} طالب كانوا مسجّلين مسبقًا في الحصة.`,
+      text || t('ui.bulk.attendance.noSkippedCodes'),
+      t('ui.bulk.attendance.skippedCopiedTitle'),
+      t('ui.bulk.attendance.skippedCopiedDesc', { p0: skippedRows.length }),
     )
   })
+  bulkRetryBtn.addEventListener('click', () => { void retryFailedBulk() })
   bulkArmBtn.addEventListener('click', () => {
     if (!readyToArm()) {
       void analyzeBulkInput()
       return
     }
     bulkArmed = true
-    setBulkBadge('مسلّح', 'on')
+    setBulkBadge(t('ui.common.armed'), 'on')
     updateBulkButtons()
     toast({
-      title: 'التنفيذ مسلّح',
-      description: 'اضغط تنفيذ للبدء. أي تعديل على البيانات سيلغي التسليح.',
+      title: t('ui.bulk.attendance.armedTitle'),
+      description: t('ui.bulk.attendance.armedDesc'),
       variant: 'warning',
     })
   })
@@ -2038,12 +2889,71 @@ export function mountShell(): void {
   bulkStopBtn.addEventListener('click', () => {
     if (!bulkRunning) return
     bulkStop.stop = true
-    setBulkBadge('جارٍ الإيقاف', 'busy')
-    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف التنفيذ بعد الطالب الحالي.', variant: 'warning' })
+    setBulkBadge(t('ui.common.stopping'), 'busy')
+    toast({ title: t('ui.common.willStop'), description: t('ui.bulk.attendance.stopDesc'), variant: 'warning' })
   })
 
   bulkCodesInput.addEventListener('input', invalidateBulkAnalysis)
   bulkLessonInput.addEventListener('input', () => { bulkLessonTouched = true; invalidateBulkAnalysis() })
+
+  // Listen on the whole bulk panel: after preview the same editable fields
+  // live in the normal review list rather than in the pre-preview stage table.
+  bulkRoot.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement
+    if (target.closest('[data-exam-stage-add]')) {
+      if (!examStageVisible() || bulkRunning) return
+      examStage.push(makeExamStageRow())
+      refreshStageAnalysis()
+      return
+    }
+    const button = target.closest<HTMLElement>('[data-exam-stage-remove]')
+    if (!button) return
+    const rowEl = button.closest<HTMLElement>('[data-exam-stage-row]')
+    examStage = examStage.filter((row) => row.id !== rowEl?.dataset.examStageRow)
+    markExamStageChanged()
+    refreshStageAnalysis()
+  })
+  function examStageRowFromEvent(event: Event): ExamStageRow | null {
+    const target = event.target as HTMLElement
+    const rowEl = target.closest<HTMLElement>('[data-exam-stage-row]')
+    return examStage.find((item) => item.id === rowEl?.dataset.examStageRow) ?? null
+  }
+
+  bulkRoot.addEventListener('input', (event) => {
+    const target = event.target as HTMLInputElement | HTMLSelectElement
+    const field = target.dataset.examStageField
+    const row = examStageRowFromEvent(event)
+    if (!field || !row) return
+    if (field === 'enabled') {
+      row.enabled = (target as HTMLInputElement).checked
+      syncBulkCodesFromStage()
+      refreshStageAnalysis()
+      return
+    } else if (field === 'code') {
+      // Keep the caret in the field while typing; the change event re-renders.
+      row.code = normalizeStudentCode(target.value)
+      syncBulkCodesFromStage()
+      markExamStageChanged()
+      return
+    } else if (field === 'amountPaid') row.options.amountPaid = target.value
+    else if (field === 'paymentNote') row.options.paymentNote = target.value
+    else return
+    markExamStageChanged()
+  })
+  bulkRoot.addEventListener('change', (event) => {
+    const target = event.target as HTMLInputElement | HTMLSelectElement
+    const field = target.dataset.examStageField
+    const row = examStageRowFromEvent(event)
+    if (!field || !row) return
+    if (field === 'paymentStatus') row.options.paymentStatus = target.value as ExamCheckinOptions['paymentStatus']
+    else if (field === 'source') row.options.source = target.value as ExamCheckinOptions['source']
+    else if (field === 'code') {
+      row.code = normalizeStudentCode(target.value)
+      refreshStageAnalysis()
+      return
+    } else return
+    markExamStageChanged()
+  })
 
   exportRefreshBtn.addEventListener('click', refreshAttendanceExport)
   exportCopyBtn.addEventListener('click', () => { void copyAttendanceExport() })
@@ -2052,19 +2962,9 @@ export function mountShell(): void {
 
   function updateBulkInputPlaceholder(): void {
     if (bulkPayMode === 'school') {
-      bulkCodesInput.placeholder = [
-        'كود أو اسم [، مبلغ] [، حالة] (, أو ،) — مبلغ بلا حالة = جزئي، بدونه = افتراضي الحصة',
-        'الحالات: كامل | جزئي | مخفض/مجاني | نسي/مؤجل',
-        '2017, 45, كامل',
-        '2016, 10, مخفض',
-        '2015, مخفض, 10',
-        'أحمد محمد, 0, نسي',
-        '2018, 30',
-        '2019',
-        'أحمد محمد',
-      ].join('\n')
+      bulkCodesInput.placeholder = t('ui.bulk.attendance.inputPlaceholderSchool')
     } else {
-      bulkCodesInput.placeholder = 'كود أو اسم في كل سطر (الدفع يُتجاهل هنا):\n2349\nأحمد محمد\n2351'
+      bulkCodesInput.placeholder = t('ui.bulk.attendance.inputPlaceholderCenter')
     }
   }
 
@@ -2165,8 +3065,8 @@ export function mountShell(): void {
     if (copyBtn) {
       void copyPlainText(
         copyBtn.dataset.copyText || '',
-        'تم النسخ',
-        'تم نسخ قائمة الطلاب (بما فيها المتجاهَلون).',
+        t('ui.bulk.attendance.copiedTitle'),
+        t('ui.bulk.attendance.undecidedCopiedDesc'),
       )
       return
     }
@@ -2180,7 +3080,7 @@ export function mountShell(): void {
       bulkNameRows = bulkNameRows.map((row) => {
         if (row.status === 'resolved' || row.status === 'dropped' || row.status === 'walk-in') return row
         changed = true
-        return { ...row, status: 'dropped' as const, message: 'تم التجاهل — سيتم إدخاله يدويًا.' }
+        return { ...row, status: 'dropped' as const, message: t('ui.bulk.attendance.ignoredMessage') }
       })
       if (changed) {
         bulkArmed = false
@@ -2197,7 +3097,7 @@ export function mountShell(): void {
       const code = (btn.dataset.code || '').toUpperCase()
       const name = btn.dataset.name || ''
       if (!code) {
-        toast({ title: 'لا يوجد كود', description: 'لا يمكن اختيار طالب بدون كود صالح.', variant: 'warning' })
+        toast({ title: t('ui.bulk.attendance.noCodeTitle'), description: t('ui.bulk.attendance.noCodeDesc'), variant: 'warning' })
         return
       }
       bulkNameRows[index] = {
@@ -2205,7 +3105,7 @@ export function mountShell(): void {
         status: 'resolved',
         code,
         studentName: name,
-        message: `تم الاختيار: ${name}${code ? ` (${code})` : ''}`,
+        message: t('ui.bulk.attendance.chosenMessage', { p0: name, p1: code ? ` (${code})` : '' }),
       }
       bulkArmed = false
       renderBulkAnalysis()
@@ -2213,7 +3113,7 @@ export function mountShell(): void {
     }
 
     if (action === 'drop') {
-      bulkNameRows[index] = { ...bulkNameRows[index], status: 'dropped', message: 'تم التجاهل — سيتم إدخاله يدويًا.' }
+      bulkNameRows[index] = { ...bulkNameRows[index], status: 'dropped', message: t('ui.bulk.attendance.ignoredMessage') }
       bulkArmed = false
       renderBulkAnalysis()
       return
@@ -2270,7 +3170,7 @@ export function mountShell(): void {
       }
       toast({ title, description, variant: 'applied' })
     } catch {
-      toast({ title: 'تعذّر النسخ', description: 'انسخ النص يدويًا من مربع النص.', variant: 'warning' })
+      toast({ title: t('ui.toast.copyFailedTitle'), description: t('ui.toast.copyFailedDesc'), variant: 'warning' })
     }
   }
 
@@ -2303,25 +3203,25 @@ export function mountShell(): void {
     }
     const { text, count, lesson, total } = buildAttendanceExport()
     exportTextarea.value = text
-    exportCount.textContent = `${count} طالب`
+    exportCount.textContent = t('ui.bulk.export.count', { p0: count })
     exportCount.classList.toggle('off', count === 0)
     exportCount.classList.toggle('on', count > 0)
-    exportSummary.textContent = lesson ? `حصة ${lesson} · ${total} سجل محفوظ` : `${total} سجل محفوظ`
+    exportSummary.textContent = lesson ? t('ui.bulk.export.summaryWithLesson', { p0: lesson, p1: total }) : t('ui.bulk.export.summaryNoLesson', { p0: total })
   }
 
   async function copyAttendanceExport(): Promise<void> {
     const text = exportTextarea.value.trim()
     if (!text) {
-      toast({ title: 'لا توجد قائمة', description: 'لا توجد سجلات حضور لتصديرها.', variant: 'warning' })
+      toast({ title: t('ui.bulk.export.noListTitle'), description: t('ui.bulk.export.noListDesc'), variant: 'warning' })
       return
     }
-    await copyPlainText(text, 'تم النسخ', 'تم نسخ قائمة الحاضرين (الكود والاسم).')
+    await copyPlainText(text, t('ui.bulk.attendance.copiedTitle'), t('ui.bulk.export.copiedDesc'))
   }
 
   function downloadAttendanceExport(): void {
     const text = exportTextarea.value.trim()
     if (!text) {
-      toast({ title: 'لا توجد قائمة', description: 'لا توجد سجلات حضور لتصديرها.', variant: 'warning' })
+      toast({ title: t('ui.bulk.export.noListTitle'), description: t('ui.bulk.export.noListDesc'), variant: 'warning' })
       return
     }
     const lesson = exportLessonId() || 'all'
@@ -2338,9 +3238,9 @@ export function mountShell(): void {
       link.click()
       link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-      toast({ title: 'تم التنزيل', description: filename, variant: 'applied' })
+      toast({ title: t('ui.bulk.export.downloadedTitle'), description: filename, variant: 'applied' })
     } catch {
-      toast({ title: 'تعذّر التنزيل', description: 'انسخ القائمة يدويًا من مربع النص.', variant: 'warning' })
+      toast({ title: t('ui.bulk.export.downloadFailedTitle'), description: t('ui.bulk.export.copyFailedDesc'), variant: 'warning' })
     }
   }
 
@@ -2355,6 +3255,7 @@ export function mountShell(): void {
   const evalResolveBox = evalRoot.querySelector<HTMLElement>('[data-eval-resolve]')!
   const evalLog = evalRoot.querySelector<HTMLElement>('[data-eval-log]')!
   const evalLogCount = evalRoot.querySelector<HTMLElement>('[data-eval-log-count]')!
+  const evalCopyResultsBtn = evalRoot.querySelector<HTMLButtonElement>('[data-eval-copy-results]')!
   const evalBadge = evalRoot.querySelector<HTMLElement>('[data-eval-badge]')!
 
   type EvalNumberMap = 'exam-homework' | 'homework-exam'
@@ -2374,6 +3275,8 @@ export function mountShell(): void {
     message?: string
   }
 
+  let evalExamMode = false
+  let evalRan = false
   let evalParsed: ParseEvalResult | null = null
   let evalRows: EvalWorkRow[] = []
   let evalArmed = false
@@ -2383,7 +3286,7 @@ export function mountShell(): void {
   let evalAnalysisToken = 0
 
   function evalSupported(): boolean {
-    return isEvaluationPage()
+    return isEvaluationPage() || (evalExamMode && isExamPage())
   }
 
   function setEvalBadge(text: string, className: string): void {
@@ -2426,21 +3329,49 @@ export function mountShell(): void {
     })
   }
 
+  /** Re-check resolved rows too: the raw textarea alone cannot stop a rematch. */
+  function examEvalRowsAllowed(): boolean {
+    if (!evalExamMode) return true
+    return examEvalCodesAllowed(evalExecutableRows().map((row) => row.code ?? ''))
+  }
+
+  function evalStatusLabel(status: EvalRowStatus): string {
+    const labels: Record<EvalRowStatus, string> = {
+      applied: t('ui.bulk.eval.logStatusApplied'),
+      partial: t('ui.bulk.eval.logStatusPartial'),
+      'not-found': t('ui.bulk.eval.logStatusNotFound'),
+      'missing-field': t('ui.bulk.eval.logStatusMissingField'),
+      invalid: t('ui.bulk.eval.logStatusInvalid'),
+      error: t('ui.common.error'),
+      stopped: t('ui.common.stopped'),
+      skipped: t('ui.bulk.eval.logStatusSkipped'),
+    }
+    return labels[status]
+  }
+
+  /** Compact, translatable summary shared by the log action and the completion toast. */
+  function formatEvalResultSummary(rows: EvalRowResult[]): string {
+    let applied = 0
+    let partial = 0
+    let skipped = 0
+    let failed = 0
+    let stopped = false
+    for (const row of rows) {
+      if (row.status === 'applied') applied++
+      else if (row.status === 'partial') partial++
+      else if (row.status === 'skipped') skipped++
+      else if (row.status === 'stopped') stopped = true
+      else failed++
+    }
+    const detail = t('ui.bulk.eval.detail', { p0: applied, p1: partial, p2: failed, p3: skipped })
+    return `${detail}${stopped ? t('ui.common.stoppedSuffix') : ''}`
+  }
+
   function renderEvalLog(): void {
     evalLogCount.textContent = String(evalLogRows.length)
     if (!evalLogRows.length) {
-      evalLog.innerHTML = `<div class="history-empty">لا يوجد تنفيذ بعد.</div>`
+      evalLog.innerHTML = `<div class="history-empty">${t('ui.common.logEmpty')}</div>`
       return
-    }
-    const statusLabel: Record<EvalRowStatus, string> = {
-      applied: 'تم التطبيق',
-      partial: 'تم جزئيًا',
-      'not-found': 'غير موجود',
-      'missing-field': 'حقل مفقود',
-      invalid: 'غير صالح',
-      error: 'خطأ',
-      stopped: 'متوقف',
-      skipped: 'متخطى',
     }
     evalLog.innerHTML = evalLogRows.slice().reverse().map((row) => {
       const cls = row.status === 'applied' ? 'ok'
@@ -2450,7 +3381,7 @@ export function mountShell(): void {
       const msg = row.message ? ` — ${escapeHtml(row.message)}` : ''
       return `<div class="bulk-log-item ${cls}">
         <span class="bulk-log-code" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span>
-        <span class="bulk-log-status">${statusLabel[row.status]}${msg}</span>
+        <span class="bulk-log-status">${evalStatusLabel(row.status)}${msg}</span>
         <span class="bulk-log-time">${formatTime(row.at)}</span>
       </div>`
     }).join('')
@@ -2463,6 +3394,7 @@ export function mountShell(): void {
 
   function evalReadyToArm(): boolean {
     if (!evalParsed) return false
+    if (evalExamMode && (!examTargetAllowed('exam-evaluation', evalInput.value) || !examEvalRowsAllowed())) return false
     if (evalRunning) return false
     if (!evalExecutableRows().length) return false
     if (evalRows.some((row) => evalNeedsDecision(row))) return false
@@ -2472,8 +3404,8 @@ export function mountShell(): void {
   function formatEvalValues(values: EvalValues | null): string {
     if (!values) return '—'
     const parts: string[] = []
-    if (values.exam != null) parts.push(`امتحان: ${values.exam}`)
-    if (values.homework != null) parts.push(`واجب: ${values.homework}`)
+    if (values.exam != null) parts.push(t('ui.bulk.eval.examValue', { p0: values.exam }))
+    if (values.homework != null) parts.push(t('ui.bulk.eval.homeworkValue', { p0: values.homework }))
     return parts.join(' · ') || '—'
   }
 
@@ -2491,15 +3423,15 @@ export function mountShell(): void {
     const renderRow = (row: EvalWorkRow): string => {
       const eff = evalEffectiveValues(row)
       const identityOk = row.identityStatus === 'ready' || row.identityStatus === 'resolved'
-      const statusText = row.identityStatus === 'dropped' ? 'تم التجاهل'
-        : row.ambiguousNumbers && !row.numberMap ? 'رقمان — اختر: أيهما الامتحان وأيهما الواجب؟'
+      const statusText = row.identityStatus === 'dropped' ? t('ui.common.dropped')
+        : row.ambiguousNumbers && !row.numberMap ? t('ui.bulk.eval.numberOrderQuestion')
         : identityOk
           ? `${formatEvalLabel(row.code, row.studentName, row.identifier)} — ${formatEvalValues(eff)}`
-          : row.identityStatus === 'ambiguous' ? 'الاسم غامض — اختر الطالب الصحيح'
-          : row.identityStatus === 'not-found' ? 'لم يُعثر على الطالب في صفحة التقييم'
-          : row.identityStatus === 'too-many' ? 'نتائج كثيرة جدًا'
-          : row.identityStatus === 'error' ? 'تعذّر التحليل'
-          : row.message || 'يحتاج قرارًا'
+          : row.identityStatus === 'ambiguous' ? t('ui.bulk.eval.ambiguousIdentity')
+          : row.identityStatus === 'not-found' ? t('ui.bulk.eval.studentNotFound')
+          : row.identityStatus === 'too-many' ? t('ui.common.tooMany')
+          : row.identityStatus === 'error' ? t('ui.bulk.eval.analysisFailed')
+          : row.message || t('ui.bulk.eval.needsDecision')
 
       const badgeCls = identityOk && !(row.ambiguousNumbers && !row.numberMap) ? 'on'
         : row.identityStatus === 'dropped' ? 'off'
@@ -2510,40 +3442,40 @@ export function mountShell(): void {
         const list = row.candidates.slice(0, 12)
         choicesHtml = `<div class="bulk-resolve-choices">${list.map((c) => {
           const chosen = identityOk && row.code && c.code === row.code
-          return `<button type="button" class="bulk-choice ${chosen ? 'selected' : ''}"
+          return `<button type="button" class="bulk-choice ${chosen ? 'selected' : ''}" ${evalExamMode ? 'disabled' : ''}
             data-eval-action="choose" data-key="${escapeHtml(row.key)}"
             data-code="${escapeHtml(c.code)}" data-name="${escapeHtml(c.name)}">
-            <span>${escapeHtml(c.name || 'طالب')}</span>
-            <small dir="ltr">${escapeHtml(c.code || 'بدون كود')}</small>
+            <span>${escapeHtml(c.name || t('ui.common.student'))}</span>
+            <small dir="ltr">${escapeHtml(c.code || t('ui.common.noCode'))}</small>
           </button>`
-        }).join('')}${row.candidates.length > 12 ? `<div class="bulk-note-inline">+${row.candidates.length - 12} نتائج أخرى</div>` : ''}</div>`
+        }).join('')}${row.candidates.length > 12 ? `<div class="bulk-note-inline">${t('ui.common.moreResults', { p0: row.candidates.length - 12 })}</div>` : ''}</div>`
       }
 
       let numberChoiceHtml = ''
       if (row.ambiguousNumbers && row.numberTokens) {
         const [a, b] = row.numberTokens
-        numberChoiceHtml = `<div class="bulk-note-inline">رقمان (${escapeHtml(a)}، ${escapeHtml(b)}) — حدّد الترتيب:</div>
+        numberChoiceHtml = `<div class="bulk-note-inline">${t('ui.bulk.eval.numberOrderPrompt', { p0: escapeHtml(a), p1: escapeHtml(b) })}</div>
           <div class="bulk-resolve-actions">
-            <button type="button" class="bulk-mini-btn ${row.numberMap === 'exam-homework' ? 'active' : ''}" data-eval-action="map" data-key="${escapeHtml(row.key)}" data-map="exam-homework">الأول امتحان (${escapeHtml(a)}) · الثاني واجب (${escapeHtml(b)})</button>
-            <button type="button" class="bulk-mini-btn ${row.numberMap === 'homework-exam' ? 'active' : ''}" data-eval-action="map" data-key="${escapeHtml(row.key)}" data-map="homework-exam">الأول واجب (${escapeHtml(a)}) · الثاني امتحان (${escapeHtml(b)})</button>
+            <button type="button" class="bulk-mini-btn ${row.numberMap === 'exam-homework' ? 'active' : ''}" data-eval-action="map" data-key="${escapeHtml(row.key)}" data-map="exam-homework">${t('ui.bulk.eval.firstExam', { p0: escapeHtml(a), p1: escapeHtml(b) })}</button>
+            <button type="button" class="bulk-mini-btn ${row.numberMap === 'homework-exam' ? 'active' : ''}" data-eval-action="map" data-key="${escapeHtml(row.key)}" data-map="homework-exam">${t('ui.bulk.eval.firstHomework', { p0: escapeHtml(a), p1: escapeHtml(b) })}</button>
           </div>`
       }
 
-      const showEdit = row.identityStatus !== 'dropped'
+      const showEdit = row.identityStatus !== 'dropped' && !evalExamMode
       const editHtml = showEdit ? `<div class="bulk-inline-edit" ${(identityOk && !(row.ambiguousNumbers && !row.numberMap)) ? 'hidden' : ''}>
-          <input type="text" class="bulk-input" data-eval-edit="${escapeHtml(row.key)}" value="${escapeHtml(row.query)}" placeholder="عدّل المعرّف ثم أعد المطابقة" />
-          <button type="button" class="bulk-mini-btn" data-eval-action="rematch" data-key="${escapeHtml(row.key)}">إعادة مطابقة</button>
+          <input type="text" class="bulk-input" data-eval-edit="${escapeHtml(row.key)}" value="${escapeHtml(row.query)}" placeholder="${t('ui.bulk.eval.editPlaceholder')}" />
+          <button type="button" class="bulk-mini-btn" data-eval-action="rematch" data-key="${escapeHtml(row.key)}">${t('ui.bulk.eval.rematch')}</button>
         </div>` : ''
 
       const actions = row.identityStatus === 'dropped'
-        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-eval-action="undrop" data-key="${escapeHtml(row.key)}">استرجاع</button></div>`
+        ? `<div class="bulk-resolve-actions"><button type="button" class="bulk-mini-btn" data-eval-action="undrop" data-key="${escapeHtml(row.key)}">${t('ui.common.restore')}</button></div>`
         : `<div class="bulk-resolve-actions">
-            ${identityOk ? `<button type="button" class="bulk-mini-btn" data-eval-action="change" data-key="${escapeHtml(row.key)}">تغيير الطالب</button>` : ''}
-            <button type="button" class="bulk-mini-btn" data-eval-action="drop" data-key="${escapeHtml(row.key)}">تجاهل</button>
+            ${identityOk && !evalExamMode ? `<button type="button" class="bulk-mini-btn" data-eval-action="change" data-key="${escapeHtml(row.key)}">${t('ui.bulk.eval.changeStudent')}</button>` : ''}
+            <button type="button" class="bulk-mini-btn" data-eval-action="drop" data-key="${escapeHtml(row.key)}">${t('ui.common.drop')}</button>
           </div>`
 
       const reason = row.message && !identityOk ? `<div class="bulk-resolve-reason">${escapeHtml(row.message)}</div>` : ''
-      const valuesNote = (identityOk && eff) ? `<div class="bulk-note-inline">القيم: ${escapeHtml(formatEvalValues(eff))}</div>` : ''
+      const valuesNote = (identityOk && eff) ? `<div class="bulk-note-inline">${t('ui.bulk.eval.valuesNote', { p0: escapeHtml(formatEvalValues(eff)) })}</div>` : ''
 
       return `<div class="bulk-resolve-item ${badgeCls === 'on' ? 'ok' : row.identityStatus === 'dropped' ? 'drop' : ''}" data-eval-key="${escapeHtml(row.key)}">
         <div class="bulk-resolve-head">
@@ -2564,14 +3496,14 @@ export function mountShell(): void {
       html += `<div class="bulk-undecided-section">
         <div class="bulk-undecided-head">
           <div class="bulk-undecided-title">
-            <strong>عناصر تحتاج قرارًا</strong>
+            <strong>${t('ui.bulk.eval.decisionTitle')}</strong>
             <span class="feature-badge busy">${undecided.length}</span>
           </div>
           <div class="bulk-resolve-actions">
-            <button type="button" class="bulk-mini-btn" data-eval-action="drop-all-unresolved">تجاهل غير المحلولين</button>
+            <button type="button" class="bulk-mini-btn" data-eval-action="drop-all-unresolved">${t('ui.bulk.eval.dropUnresolved')}</button>
           </div>
         </div>
-        <div class="bulk-note-inline">حلّ غموض الطالب/الأرقام أو تجاهل العنصر للمتابعة بالباقي.</div>
+        <div class="bulk-note-inline">${t('ui.bulk.eval.decisionNote')}</div>
         ${undecided.map(renderRow).join('')}
       </div>`
     }
@@ -2588,14 +3520,14 @@ export function mountShell(): void {
 
   function renderEvalAnalysis(): void {
     if (!evalParsed) {
-      evalPreviewBox.textContent = 'لم تتم المعاينة بعد.'
+      evalPreviewBox.textContent = t('ui.common.previewEmpty')
       evalResolveBox.hidden = true
       evalResolveBox.innerHTML = ''
       updateEvalBulkButtons()
       return
     }
     if (!evalSupported()) {
-      evalPreviewBox.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/evaluation</code> التي تحتوي جدول الطلاب أولًا.</div>`
+      evalPreviewBox.innerHTML = `<div class="bulk-warn">${t('ui.bulk.eval.openEvalPage')}</div>`
       renderEvalResolve()
       updateEvalBulkButtons()
       return
@@ -2607,21 +3539,21 @@ export function mountShell(): void {
     const numbersAmb = evalRows.filter((row) => row.ambiguousNumbers && !row.numberMap).length
     const parts: string[] = []
     parts.push(`<div class="bulk-preview-grid">
-      <div><strong>أسطر صالحة</strong><span>${evalParsed.entries.length}</span></div>
-      <div><strong>جاهزة للتنفيذ</strong><span>${exec.length}</span></div>
-      <div><strong>تحتاج قرارًا</strong><span>${needs}</span></div>
-      <div><strong>أرقام غامضة</strong><span>${numbersAmb}</span></div>
-      <div><strong>متجاهَلة</strong><span>${dropped}</span></div>
-      <div><strong>غير صالحة</strong><span>${evalParsed.invalid.length}</span></div>
-      <div><strong>مكررة</strong><span>${evalParsed.duplicates.length}</span></div>
+      <div><strong>${t('ui.bulk.eval.summaryValid')}</strong><span>${evalParsed.entries.length}</span></div>
+      <div><strong>${t('ui.bulk.eval.summaryReady')}</strong><span>${exec.length}</span></div>
+      <div><strong>${t('ui.bulk.eval.summaryNeeds')}</strong><span>${needs}</span></div>
+      <div><strong>${t('ui.bulk.eval.summaryAmbiguous')}</strong><span>${numbersAmb}</span></div>
+      <div><strong>${t('ui.bulk.eval.summaryDropped')}</strong><span>${dropped}</span></div>
+      <div><strong>${t('ui.bulk.attendance.invalid')}</strong><span>${evalParsed.invalid.length}</span></div>
+      <div><strong>${t('ui.bulk.attendance.duplicates')}</strong><span>${evalParsed.duplicates.length}</span></div>
     </div>`)
-    if (!evalParsed.entries.length) parts.push(`<div class="bulk-warn">لا توجد أسطر صالحة للتحليل.</div>`)
-    if (evalParsed.invalid.length) parts.push(`<div class="bulk-warn">أسطر غير صالحة سيتم تجاهلها: ${evalParsed.invalid.slice(0, 8).map(escapeHtml).join('، ')}${evalParsed.invalid.length > 8 ? '…' : ''}</div>`)
-    if (numbersAmb) parts.push(`<div class="bulk-warn">يوجد ${numbersAmb} سطر برقمين — اختر أيهما الامتحان وأيهما الواجب.</div>`)
-    if (needs) parts.push(`<div class="bulk-warn">يوجد ${needs} عنصر يحتاج قرارًا (مطابقة طالب/تحديد أرقام/تجاهل) قبل التسليح.</div>`)
-    if (!undoRedo.enabled) parts.push(`<div class="bulk-warn">ميزة التراجع متوقفة؛ فعّلها لتسجيل الدفعة كتراجع واحد.</div>`)
-    if (!exec.length && evalParsed.entries.length) parts.push(`<div class="bulk-warn">لا توجد عناصر جاهزة للتنفيذ.</div>`)
-    parts.push(`<div class="bulk-note-inline">مطابقة الطلاب تتم من صفوف جدول التقييم المحمّلة في الصفحة الحالية. القيم غير المذكورة تُترك على الوضع الافتراضي للصفحة. الحفظ يعتمد على سلوك الصفحة (قد يكون تلقائيًا عند التغيير).</div>`)
+    if (!evalParsed.entries.length) parts.push(`<div class="bulk-warn">${t('ui.bulk.eval.noValidLines')}</div>`)
+    if (evalParsed.invalid.length) parts.push(`<div class="bulk-warn">${t('ui.bulk.eval.invalidLines', { p0: evalParsed.invalid.slice(0, 8).map(escapeHtml).join(listSeparator()), p1: evalParsed.invalid.length > 8 ? '…' : '' })}</div>`)
+    if (numbersAmb) parts.push(`<div class="bulk-warn">${t('ui.bulk.eval.ambiguousNumbersWarning', { p0: numbersAmb })}</div>`)
+    if (needs) parts.push(`<div class="bulk-warn">${t('ui.bulk.eval.needsDecisionWarning', { p0: needs })}</div>`)
+    if (!undoRedo.enabled) parts.push(`<div class="bulk-warn">${t('ui.bulk.eval.undoDisabledWarning')}</div>`)
+    if (!exec.length && evalParsed.entries.length) parts.push(`<div class="bulk-warn">${t('ui.bulk.eval.noReadyItems')}</div>`)
+    parts.push(`<div class="bulk-note-inline">${t('ui.bulk.eval.matchingNote')}</div>`)
     evalPreviewBox.innerHTML = parts.join('')
     renderEvalResolve()
     updateEvalBulkButtons()
@@ -2635,14 +3567,27 @@ export function mountShell(): void {
     evalRunBtn.disabled = !supported || evalRunning || !evalArmed || !evalReadyToArm() || !undoRedo.enabled
     evalStopBtn.disabled = !evalRunning
 
-    if (!supported) setEvalBadge('خارج صفحة التقييم', 'off')
-    else if (evalRunning) setEvalBadge('جارٍ التنفيذ', 'busy')
-    else if (evalArmed) setEvalBadge('مسلّح', 'on')
-    else if (evalRows.some((row) => evalNeedsDecision(row))) setEvalBadge('يتطلب قرارًا', 'busy')
-    else setEvalBadge('جاهز', 'off')
+    if (!supported) setEvalBadge(t('ui.bulk.eval.notOnPage'), 'off')
+    else if (evalRunning) setEvalBadge(t('ui.common.running'), 'busy')
+    else if (evalArmed) setEvalBadge(t('ui.common.armed'), 'on')
+    else if (evalRows.some((row) => evalNeedsDecision(row))) setEvalBadge(t('ui.common.needsDecision'), 'busy')
+    else setEvalBadge(t('ui.common.ready'), 'off')
   }
 
   function analyzeEvaluationBulk(): void {
+    if (evalExamMode && !examTargetAllowed('exam-evaluation', evalInput.value)) {
+      evalAnalysisToken++
+      evalParsed = null
+      evalRows = []
+      evalArmed = false
+      evalPreviewBox.innerHTML = `<div class="bulk-warn">${t('ui.bulk.exam.guard')}</div>`
+      evalResolveBox.hidden = true
+      evalResolveBox.innerHTML = ''
+      renderEvalLog()
+      updateEvalBulkButtons()
+      return
+    }
+
     evalAnalysisToken++
     evalParsed = parseEvaluationEntries(evalInput.value)
     evalRows = evalParsed.entries.map((entry) => {
@@ -2675,7 +3620,7 @@ export function mountShell(): void {
     evalParsed = null
     evalRows = []
     evalArmed = false
-    evalPreviewBox.textContent = 'تم تعديل البيانات — أعد المعاينة والتحليل قبل التنفيذ.'
+    evalPreviewBox.textContent = t('ui.common.dataEdited')
     evalResolveBox.hidden = true
     evalResolveBox.innerHTML = ''
     updateEvalBulkButtons()
@@ -2701,19 +3646,24 @@ export function mountShell(): void {
   }
 
   async function executeEvaluationBulk(): Promise<void> {
+    evalRan = false
     if (evalRunning || !evalArmed || !evalParsed) return
+    if (evalExamMode && (!examTargetAllowed('exam-evaluation', evalInput.value) || !examEvalRowsAllowed())) {
+      toast({ title: t('ui.bulk.exam.title', { p0: t('ui.bulk.menu.examEvaluation.title') }), description: t('ui.bulk.exam.guard'), variant: 'warning' })
+      return
+    }
     if (!evalSupported()) {
-      toast({ title: 'خارج صفحة التقييم', description: 'افتح صفحة التقييم أولًا.', variant: 'warning' })
+      toast({ title: t('ui.bulk.eval.notOnPage'), description: t('ui.bulk.eval.openPageToast'), variant: 'warning' })
       return
     }
     if (evalRows.some((row) => evalNeedsDecision(row))) {
-      toast({ title: 'يوجد عناصر تحتاج قرارًا', description: 'حلّ الغموض أو تجاهل العناصر قبل التنفيذ.', variant: 'warning' })
+      toast({ title: t('ui.bulk.eval.unresolvedToastTitle'), description: t('ui.bulk.eval.unresolvedToastDesc'), variant: 'warning' })
       return
     }
     const entries = evalExecutableRows()
     if (!entries.length) return
     if (!undoRedo.enabled) {
-      toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل دفعة قابلة للإلغاء مع تعطيل التراجع.', variant: 'warning' })
+      toast({ title: t('ui.menu.enableUndoTitle'), description: t('ui.bulk.eval.enableUndoDesc'), variant: 'warning' })
       return
     }
 
@@ -2724,31 +3674,26 @@ export function mountShell(): void {
     evalArmed = false
     updateEvalBulkButtons()
 
-    undoRedo.beginBatch('تقييم جماعي')
+    undoRedo.beginBatch(t('ui.bulk.eval.batchTitle'))
+    evalRan = true
     let applied = 0
     let partial = 0
-    let failed = 0
-    let skipped = 0
-    let stopped = false
 
     try {
       for (const item of entries) {
         if (evalStop.stop) {
-          stopped = true
-          appendEvalLog({ key: item.key, label: formatEvalLabel(item.code, item.studentName, item.identifier), status: 'stopped', message: 'تم الإيقاف', at: Date.now() })
+          appendEvalLog({ key: item.key, label: formatEvalLabel(item.code, item.studentName, item.identifier), status: 'stopped', message: t('ui.bulk.eval.stoppedMessage'), at: Date.now() })
           break
         }
         const values = evalEffectiveValues(item)
         const label = formatEvalLabel(item.code, item.studentName, item.identifier)
         if (!item.code || !values) {
-          skipped++
-          appendEvalLog({ key: item.key, label, status: 'skipped', message: 'بيانات غير مكتملة', at: Date.now() })
+          appendEvalLog({ key: item.key, label, status: 'skipped', message: t('ui.bulk.eval.incompleteData'), at: Date.now() })
           continue
         }
         const row = findRowForCode(item.code)
         if (!row) {
-          failed++
-          appendEvalLog({ key: item.key, label, status: 'not-found', message: 'الصف غير موجود في الجدول الحالي', at: Date.now() })
+          appendEvalLog({ key: item.key, label, status: 'not-found', message: t('ui.bulk.eval.rowNotFound'), at: Date.now() })
           continue
         }
         try {
@@ -2756,43 +3701,49 @@ export function mountShell(): void {
           const at = Date.now()
           if (res.status === 'applied') applied++
           else if (res.status === 'partial') partial++
-          else if (res.status === 'skipped') skipped++
-          else failed++
           appendEvalLog({ key: item.key, label, status: res.status, message: res.message, at })
           // allow page to react/save between rows (best-effort)
           await new Promise((r) => window.setTimeout(r, 120))
         } catch (err) {
-          failed++
           appendEvalLog({ key: item.key, label, status: 'error', message: err instanceof Error ? err.message : String(err), at: Date.now() })
         }
       }
 
-      const detail = `تم ${applied} · جزئي ${partial} · فشل ${failed} · متخطى ${skipped}${stopped ? ' · متوقف' : ''}`
+      const detail = formatEvalResultSummary(evalLogRows)
       const committed = undoRedo.commitBatch({
-        title: `تقييم جماعي (${applied + partial})`,
+        title: t('ui.bulk.eval.batchTitleCount', { p0: applied + partial }),
         detail,
       })
 
       if ((applied + partial) > 0 && !committed) {
         toast({
-          title: 'اكتمل التنفيذ بدون سجل تراجع',
-          description: 'لم تُرصد إجراءات قابلة للإلغاء. قد يكون الحفظ يتطلب إجراءً يدويًا في الصفحة (تحقق حيًا).',
+          title: t('ui.bulk.attendance.noUndoTitle'),
+          description: t('ui.bulk.eval.noUndoDesc'),
           variant: 'warning',
           duration: 8000,
         })
       } else if (applied + partial > 0) {
+        const resultRows = evalLogRows.slice()
         toast({
-          title: 'اكتمل التقييم الجماعي',
-          description: `${detail}. يمكن التراجع عن الدفعة بـ Ctrl+Z.`,
+          title: t('ui.bulk.eval.completedTitle'),
+          description: `${detail}${t('ui.common.undoBatchSuffix')}`,
           variant: 'applied',
           duration: 7000,
+          action: resultRows.length ? {
+            label: t('ui.bulk.eval.copyResults'),
+            onClick: () => { void copyPlainText(
+              formatEvalResultSummary(resultRows),
+              t('ui.bulk.eval.resultsCopiedTitle'),
+              t('ui.bulk.eval.resultsCopiedDesc'),
+            ) },
+          } : undefined,
         })
       } else {
-        toast({ title: 'لا توجد تغييرات مطبقة', description: detail, variant: 'info' })
+        toast({ title: t('ui.bulk.eval.noChangesTitle'), description: detail, variant: 'info' })
       }
     } catch (error) {
-      undoRedo.commitBatch({ title: `تقييم جماعي (${undoRedo.batchCount})`, detail: 'انتهى التنفيذ بخطأ' })
-      toast({ title: 'حدث خطأ أثناء التنفيذ', description: error instanceof Error ? error.message : String(error), variant: 'error' })
+      undoRedo.commitBatch({ title: t('ui.bulk.eval.batchTitleCount', { p0: undoRedo.batchCount }), detail: t('ui.bulk.attendance.errorEnded') })
+      toast({ title: t('ui.common.executionErrorTitle'), description: error instanceof Error ? error.message : String(error), variant: 'error' })
     } finally {
       evalRunning = false
       evalStop.stop = false
@@ -2801,19 +3752,26 @@ export function mountShell(): void {
   }
 
   evalPreviewBtn.addEventListener('click', analyzeEvaluationBulk)
+  evalCopyResultsBtn.addEventListener('click', () => {
+    void copyPlainText(
+      evalLogRows.length ? formatEvalResultSummary(evalLogRows) : t('ui.common.logEmpty'),
+      t('ui.bulk.eval.resultsCopiedTitle'),
+      t('ui.bulk.eval.resultsCopiedDesc'),
+    )
+  })
   evalArmBtn.addEventListener('click', () => {
     if (!evalReadyToArm()) { analyzeEvaluationBulk(); return }
     evalArmed = true
-    setEvalBadge('مسلّح', 'on')
+    setEvalBadge(t('ui.common.armed'), 'on')
     updateEvalBulkButtons()
-    toast({ title: 'التنفيذ مسلّح', description: 'اضغط تنفيذ للبدء. أي تعديل سيلغي التسليح.', variant: 'warning' })
+    toast({ title: t('ui.bulk.attendance.armedTitle'), description: t('ui.bulk.eval.armedDesc'), variant: 'warning' })
   })
   evalRunBtn.addEventListener('click', () => { void executeEvaluationBulk() })
   evalStopBtn.addEventListener('click', () => {
     if (!evalRunning) return
     evalStop.stop = true
-    setEvalBadge('جارٍ الإيقاف', 'busy')
-    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف التنفيذ بعد الطالب الحالي.', variant: 'warning' })
+    setEvalBadge(t('ui.common.stopping'), 'busy')
+    toast({ title: t('ui.common.willStop'), description: t('ui.bulk.attendance.stopDesc'), variant: 'warning' })
   })
   evalInput.addEventListener('input', invalidateEvalBulk)
 
@@ -2828,7 +3786,7 @@ export function mountShell(): void {
       evalRows = evalRows.map((row) => {
         if (!evalNeedsDecision(row) || row.identityStatus === 'dropped') return row
         changed = true
-        return { ...row, identityStatus: 'dropped' as const, message: 'تم التجاهل' }
+        return { ...row, identityStatus: 'dropped' as const, message: t('ui.common.dropped') }
       })
       if (changed) { evalArmed = false; renderEvalAnalysis() }
       return
@@ -2841,10 +3799,10 @@ export function mountShell(): void {
       const code = (btn.dataset.code || '').toUpperCase()
       const name = btn.dataset.name || ''
       if (!code) {
-        toast({ title: 'لا يوجد كود', description: 'لا يمكن اختيار طالب بدون كود صالح.', variant: 'warning' })
+        toast({ title: t('ui.bulk.attendance.noCodeTitle'), description: t('ui.bulk.attendance.noCodeDesc'), variant: 'warning' })
         return
       }
-      evalRows[index] = { ...evalRows[index], identityStatus: 'resolved', code, studentName: name, message: `تم الاختيار: ${name}` }
+      evalRows[index] = { ...evalRows[index], identityStatus: 'resolved', code, studentName: name, message: t('ui.bulk.eval.chosenMessage', { p0: name }) }
       evalArmed = false
       renderEvalAnalysis()
       return
@@ -2859,7 +3817,7 @@ export function mountShell(): void {
       return
     }
     if (action === 'drop') {
-      evalRows[index] = { ...evalRows[index], identityStatus: 'dropped', message: 'تم التجاهل' }
+      evalRows[index] = { ...evalRows[index], identityStatus: 'dropped', message: t('ui.common.dropped') }
       evalArmed = false
       renderEvalAnalysis()
       return
@@ -2924,19 +3882,19 @@ export function mountShell(): void {
   function removeRecordLabel(record: LiveRecord): string {
     const code = String(record.studentCode ?? record.username ?? '').trim()
     const name = String(record.name ?? '').trim()
-    return name && code ? `${name} (${code})` : name || code || `سجل ${record.id}`
+    return name && code ? `${name} (${code})` : name || code || t('ui.bulk.remove.recordFallback', { p0: record.id })
   }
 
   function renderRemoveLog(): void {
     removeLogCount.textContent = String(removeLogRows.length)
     if (!removeLogRows.length) {
-      removeLog.innerHTML = `<div class="history-empty">لا يوجد تنفيذ بعد.</div>`
+      removeLog.innerHTML = `<div class="history-empty">${t('ui.common.logEmpty')}</div>`
       return
     }
     const statusLabel: Record<RemoveLogStatus, string> = {
-      removed: 'تم الحذف',
-      error: 'خطأ',
-      stopped: 'متوقف',
+      removed: t('ui.bulk.remove.logStatusRemoved'),
+      error: t('ui.common.error'),
+      stopped: t('ui.common.stopped'),
     }
     removeLog.innerHTML = removeLogRows.slice().reverse().map((row) => {
       const cls = row.status === 'removed' ? 'ok' : row.status === 'stopped' ? 'warn' : 'err'
@@ -2958,18 +3916,18 @@ export function mountShell(): void {
     const lesson = removeLessonId()
     if (!removeSupported()) {
       removeSummary.textContent = '—'
-      removePreview.innerHTML = `<div class="bulk-warn">افتح صفحة <code>/attendance/scan</code> أولًا.</div>`
+      removePreview.innerHTML = `<div class="bulk-warn">${t('ui.bulk.attendance.openScanPage')}</div>`
       return
     }
     if (!removeRecords.length) {
-      removeSummary.textContent = lesson ? `حصة ${lesson} · 0 سجل` : '0 سجل'
-      removePreview.textContent = 'لا توجد سجلات حضور لهذه الحصة.'
+      removeSummary.textContent = lesson ? t('ui.bulk.remove.summaryWithLesson', { p0: lesson, p1: 0 }) : t('ui.bulk.remove.summaryNoLesson', { p0: 0 })
+      removePreview.textContent = t('ui.bulk.remove.noRecordsPreview')
       return
     }
     const lines = removeRecords.slice(0, 20).map((record) => `<div class="bulk-remove-name">${escapeHtml(removeRecordLabel(record))}</div>`).join('')
-    const more = removeRecords.length > 20 ? `<div class="bulk-note-inline">و ${removeRecords.length - 20} سجلًا آخر…</div>` : ''
-    removeSummary.textContent = `حصة ${lesson || '?'} · ${removeRecords.length} سجل`
-    removePreview.innerHTML = `<strong>${removeRecords.length} سجل سيُحذف:</strong>${lines}${more}`
+    const more = removeRecords.length > 20 ? `<div class="bulk-note-inline">${t('ui.bulk.remove.moreRecords', { p0: removeRecords.length - 20 })}</div>` : ''
+    removeSummary.textContent = t('ui.bulk.remove.summaryWithLesson', { p0: lesson || '?', p1: removeRecords.length })
+    removePreview.innerHTML = `<strong>${t('ui.bulk.remove.recordsToDelete', { p0: removeRecords.length })}</strong>${lines}${more}`
   }
 
   function updateRemoveButtons(): void {
@@ -2980,11 +3938,11 @@ export function mountShell(): void {
     removeRunBtn.disabled = !supported || removeRunning || !removeArmed || !hasRecords || !undoRedo.enabled
     removeStopBtn.disabled = !removeRunning
 
-    if (!supported) setRemoveBadge('خارج صفحة الحضور', 'off')
-    else if (removeRunning) setRemoveBadge('جارٍ الحذف', 'busy')
-    else if (removeArmed) setRemoveBadge('مسلّح', 'on')
-    else if (hasRecords) setRemoveBadge('جاهز', 'off')
-    else setRemoveBadge('لا توجد سجلات', 'off')
+    if (!supported) setRemoveBadge(t('ui.bulk.attendance.notOnPage'), 'off')
+    else if (removeRunning) setRemoveBadge(t('ui.bulk.remove.deleting'), 'busy')
+    else if (removeArmed) setRemoveBadge(t('ui.common.armed'), 'on')
+    else if (hasRecords) setRemoveBadge(t('ui.common.ready'), 'off')
+    else setRemoveBadge(t('ui.bulk.remove.noRecordsBadge'), 'off')
   }
 
   async function refreshRemoveRecords(quiet = false): Promise<void> {
@@ -2994,16 +3952,16 @@ export function mountShell(): void {
       removeArmed = false
       renderRemovePreview()
       updateRemoveButtons()
-      toast({ title: 'خارج صفحة الحضور', description: 'افتح /attendance/scan أولًا.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.notOnPage'), description: t('ui.bulk.remove.noPageDesc'), variant: 'warning' })
       return
     }
     const lesson = removeLessonId()
     if (!lesson) {
-      toast({ title: 'رقم الحصة مطلوب', description: 'أدخل رقم الحصة أو افتح رابط الحضور الصحيح.', variant: 'warning' })
+      toast({ title: t('ui.bulk.remove.lessonRequiredTitle'), description: t('ui.bulk.remove.lessonRequiredDesc'), variant: 'warning' })
       return
     }
     if (!removeLessonInput.value.trim()) removeLessonInput.value = lesson
-    setRemoveBadge('جارٍ التحميل', 'busy')
+    setRemoveBadge(t('ui.bulk.remove.loading'), 'busy')
     removeRefreshBtn.disabled = true
     try {
       removeRecords = await undoRedo.refreshAttendanceLesson(lesson)
@@ -3011,8 +3969,8 @@ export function mountShell(): void {
       renderRemovePreview()
       if (!quiet) {
         toast({
-          title: 'تم تحديث القائمة',
-          description: `${removeRecords.length} سجل حاضر في حصة ${lesson}.`,
+          title: t('ui.bulk.remove.refreshedTitle'),
+          description: t('ui.bulk.remove.refreshedDesc', { p0: removeRecords.length, p1: lesson }),
           variant: 'info',
         })
       }
@@ -3021,7 +3979,7 @@ export function mountShell(): void {
       removeArmed = false
       renderRemovePreview()
       toast({
-        title: 'تعذّر تحميل الحضور',
+        title: t('ui.bulk.remove.loadFailedTitle'),
         description: error instanceof Error ? error.message : String(error),
         variant: 'error',
       })
@@ -3033,11 +3991,11 @@ export function mountShell(): void {
   async function executeRemoveAll(): Promise<void> {
     if (removeRunning || !removeArmed || !removeRecords.length) return
     if (!removeSupported()) {
-      toast({ title: 'خارج صفحة الحضور', description: 'افتح /attendance/scan أولًا.', variant: 'warning' })
+      toast({ title: t('ui.bulk.attendance.notOnPage'), description: t('ui.bulk.remove.noPageDesc'), variant: 'warning' })
       return
     }
     if (!undoRedo.enabled) {
-      toast({ title: 'فعّل التراجع أولًا', description: 'لا يمكن تسجيل حذف قابل للإلغاء مع تعطيل التراجع.', variant: 'warning' })
+      toast({ title: t('ui.menu.enableUndoTitle'), description: t('ui.bulk.remove.enableUndoDesc'), variant: 'warning' })
       return
     }
 
@@ -3049,9 +4007,9 @@ export function mountShell(): void {
     renderRemoveLog()
     renderRemovePreview()
     updateRemoveButtons()
-    setRemoveBadge('جارٍ الحذف', 'busy')
+    setRemoveBadge(t('ui.bulk.remove.deleting'), 'busy')
 
-    undoRedo.beginBatch(`إزالة حضور الحصة ${lesson}`)
+    undoRedo.beginBatch(t('ui.bulk.remove.batchTitle', { p0: lesson }))
     let removed = 0
     let failed = 0
     let stopped = false
@@ -3060,7 +4018,7 @@ export function mountShell(): void {
       for (const record of removeRecords) {
         if (removeStop.stop) {
           stopped = true
-          appendRemoveLog({ label: `حصة ${lesson}`, status: 'stopped', message: 'تم الإيقاف', at: Date.now() })
+          appendRemoveLog({ label: t('ui.bulk.remove.stoppedLabel', { p0: lesson }), status: 'stopped', message: t('ui.bulk.remove.stoppedMessage'), at: Date.now() })
           break
         }
         const label = removeRecordLabel(record)
@@ -3079,24 +4037,24 @@ export function mountShell(): void {
         }
       }
 
-      const detail = `حُذف ${removed} · فشل ${failed}${stopped ? ' · متوقف' : ''}`
+      const detail = t('ui.bulk.remove.detail', { p0: removed, p1: failed, p2: stopped ? t('ui.common.stoppedSuffix') : '' })
       const committed = undoRedo.commitBatch({
-        title: `إزالة حضور الحصة ${lesson} (${removed})`,
+        title: t('ui.bulk.remove.batchTitleCount', { p0: lesson, p1: removed }),
         detail,
       })
       toast({
-        title: committed ? 'اكتمل حذف الحضور' : 'اكتمل الحذف بدون سجل تراجع',
-        description: committed ? `${detail}. يمكن التراجع عن الدفعة بـ Ctrl+Z.` : detail,
+        title: committed ? t('ui.bulk.remove.completedTitle') : t('ui.bulk.remove.noUndoTitle'),
+        description: committed ? `${detail}${t('ui.common.undoBatchSuffix')}` : detail,
         variant: committed ? 'applied' : 'warning',
         duration: 7000,
       })
     } catch (error) {
       undoRedo.commitBatch({
-        title: `إزالة حضور الحصة ${lesson} (${undoRedo.batchCount})`,
-        detail: 'انتهى التنفيذ بخطأ',
+        title: t('ui.bulk.remove.batchTitleCount', { p0: lesson, p1: undoRedo.batchCount }),
+        detail: t('ui.bulk.attendance.errorEnded'),
       })
       toast({
-        title: 'حدث خطأ أثناء الحذف',
+        title: t('ui.bulk.remove.deleteErrorTitle'),
         description: error instanceof Error ? error.message : String(error),
         variant: 'error',
       })
@@ -3117,8 +4075,8 @@ export function mountShell(): void {
     renderRemovePreview()
     updateRemoveButtons()
     toast({
-      title: 'الحذف مسلّح',
-      description: 'اضغط «حذف الكل» للبدء. يمكنك التراجع عن الدفعة بـ Ctrl+Z.',
+      title: t('ui.bulk.remove.armTitle'),
+      description: t('ui.bulk.remove.armDesc'),
       variant: 'warning',
     })
   })
@@ -3126,8 +4084,8 @@ export function mountShell(): void {
   removeStopBtn.addEventListener('click', () => {
     if (!removeRunning) return
     removeStop.stop = true
-    setRemoveBadge('جارٍ الإيقاف', 'busy')
-    toast({ title: 'سيتم الإيقاف', description: 'سيتوقف الحذف بعد السجل الحالي.', variant: 'warning' })
+    setRemoveBadge(t('ui.common.stopping'), 'busy')
+    toast({ title: t('ui.common.willStop'), description: t('ui.bulk.remove.stopDesc'), variant: 'warning' })
   })
   removeLessonInput.addEventListener('input', () => {
     removeArmed = false
@@ -3138,17 +4096,89 @@ export function mountShell(): void {
 
   const bulkMenu = backdrop.querySelector<HTMLElement>('[data-bulk-view="menu"]')!
   const bulkDetails = Array.from(backdrop.querySelectorAll<HTMLElement>('.bulk-detail[data-bulk-view]'))
-  function showBulkView(view: 'menu' | 'attendance' | 'evaluation' | 'export' | 'remove'): void {
-    bulkMenu.hidden = view !== 'menu'
-    for (const detail of bulkDetails) {
-      detail.hidden = detail.dataset.bulkView !== view
+  type BulkView = 'menu' | 'attendance' | 'evaluation' | 'exam-attendance' | 'exam-evaluation' | 'export' | 'remove' | 'remote'
+  let currentBulkView: BulkView = 'menu'
+
+  function updateBulkExamLabels(view: BulkView): void {
+    const examAttendance = view === 'exam-attendance'
+    const examEvaluation = view === 'exam-evaluation'
+
+    const bulkTitle = bulkRoot.querySelector<HTMLElement>('[data-bulk-head-title]')
+    const bulkSubtitle = bulkRoot.querySelector<HTMLElement>('[data-bulk-head-subtitle]')
+    const bulkNote = bulkRoot.querySelector<HTMLElement>('[data-bulk-head-note]')
+    if (bulkTitle) {
+      bulkTitle.textContent = examAttendance
+        ? t('ui.bulk.exam.title', { p0: t('ui.bulk.menu.examAttendance.title') })
+        : t('ui.bulk.menu.attendance.title')
     }
-    if (view === 'attendance') {
+    if (bulkSubtitle) {
+      bulkSubtitle.textContent = examAttendance
+        ? t('ui.bulk.exam.detailDesc', { p0: currentExamId() || '—' })
+        : t('ui.bulk.attendance.subtitle')
+    }
+    if (bulkNote) {
+      bulkNote.textContent = examAttendance
+        ? t('ui.bulk.exam.attendanceWarning')
+        : t('ui.bulk.attendance.note')
+    }
+
+    const evalTitle = evalRoot.querySelector<HTMLElement>('[data-eval-head-title]')
+    const evalSubtitle = evalRoot.querySelector<HTMLElement>('[data-eval-head-subtitle]')
+    const evalNote = evalRoot.querySelector<HTMLElement>('[data-eval-head-note]')
+    if (evalTitle) {
+      evalTitle.textContent = examEvaluation
+        ? t('ui.bulk.exam.title', { p0: t('ui.bulk.menu.examEvaluation.title') })
+        : t('ui.bulk.menu.evaluation.title')
+    }
+    if (evalSubtitle) {
+      evalSubtitle.textContent = examEvaluation
+        ? t('ui.bulk.exam.detailDesc', { p0: currentExamId() || '—' })
+        : t('ui.bulk.eval.subtitle')
+    }
+    if (evalNote) {
+      evalNote.textContent = examEvaluation
+        ? t('ui.bulk.exam.note', { p0: currentExamId() || '—' })
+        : [
+          t('ui.bulk.eval.note1'), t('ui.bulk.eval.note2'), t('ui.bulk.eval.note3'),
+          t('ui.bulk.eval.note4'), t('ui.bulk.eval.note5'), t('ui.bulk.eval.note6'),
+          t('ui.bulk.eval.note7'), t('ui.bulk.eval.note8'), t('ui.bulk.eval.note9'),
+        ].join('')
+    }
+  }
+
+  function showBulkView(view: BulkView): void {
+    bulkExamMode = view === 'exam-attendance'
+    evalExamMode = view === 'exam-evaluation'
+    currentBulkView = view
+    // Exam actions reuse the attendance/evaluation panels; they have no
+    // dedicated `data-bulk-view` node, so map them before toggling visibility.
+    const panelView = view === 'exam-attendance'
+      ? 'attendance'
+      : view === 'exam-evaluation'
+        ? 'evaluation'
+        : view
+    bulkMenu.hidden = panelView !== 'menu'
+    for (const detail of bulkDetails) {
+      detail.hidden = detail.dataset.bulkView !== panelView
+    }
+    updateBulkExamLabels(view)
+    updateExamStagePanel()
+
+    if (view === 'exam-attendance') {
       refreshBulkLesson()
+      invalidateBulkAnalysis()
+      updateBulkButtons()
+    } else if (view === 'exam-evaluation') {
+      invalidateEvalBulk()
+      updateEvalBulkButtons()
+    } else if (view === 'attendance') {
+      refreshBulkLesson()
+      invalidateBulkAnalysis()
       updateBulkButtons()
     } else if (view === 'export') {
       refreshAttendanceExport()
     } else if (view === 'evaluation') {
+      invalidateEvalBulk()
       updateEvalBulkButtons()
     } else if (view === 'remove') {
       const lesson = currentLessonIdFromPage() || undoRedo.lessonId || ''
@@ -3156,68 +4186,651 @@ export function mountShell(): void {
       void refreshRemoveRecords(true)
     }
   }
+  const bulkMenuItems = Array.from(backdrop.querySelectorAll<HTMLButtonElement>('.bulk-menu-list .bulk-item'))
+  const bulkModeHint = backdrop.querySelector<HTMLElement>('[data-bulk-mode-hint]')!
+
+  /** Reflect the remote toggle and the current page in the action menu. */
+  function renderBulkMenu(): void {
+    bulkModeHint.hidden = false
+    bulkModeHint.textContent = state.remoteBulk
+      ? t('ui.bulk.menu.modeHint')
+      : t('ui.bulk.menu.localHint')
+    for (const item of bulkMenuItems) {
+      const badge = item.querySelector<HTMLElement>('[data-bulk-availability]')!
+      const kind = item.dataset.bulkKind
+      let available: boolean
+      let label: string
+      if (state.remoteBulk) {
+        // All four run actions can be driven from a target tab. Export and
+        // remove read/write the current tab only, so they stay local.
+        available = !!kind && isBulkRunKind(kind)
+        label = available ? t('ui.bulk.menu.remoteBadge') : t('ui.bulk.menu.localOnly')
+      } else {
+        // Local mode: each action needs its own page open.
+        available = kind
+          ? bulkKindMatchesPath(kind, location.pathname)
+          : bulkKindMatchesPath('attendance', location.pathname)
+        label = available ? t('ui.bulk.menu.available') : t('ui.bulk.menu.wrongPage')
+      }
+      item.disabled = !available
+      item.classList.toggle('is-unavailable', !available)
+      badge.className = `feature-badge ${available ? 'on' : 'off'}`
+      badge.textContent = label
+    }
+  }
+
   for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-open]'))) {
     btn.addEventListener('click', () => {
+      if (btn.disabled) return
       const view = btn.dataset.bulkOpen
-      if (view === 'attendance' || view === 'evaluation' || view === 'export' || view === 'remove') showBulkView(view)
+      if (!view || view === 'remote') return
+      if (state.remoteBulk && isBulkRunKind(view)) {
+        openRemoteForKind(view)
+        return
+      }
+      if (view === 'attendance' || view === 'evaluation' || view === 'exam-attendance'
+        || view === 'exam-evaluation' || view === 'export' || view === 'remove') {
+        showBulkView(view)
+      }
     })
   }
   for (const btn of Array.from(backdrop.querySelectorAll<HTMLButtonElement>('[data-bulk-back]'))) {
     btn.addEventListener('click', () => showBulkView('menu'))
   }
 
-  GM_registerMenuCommand('Tamperina — معاينة الإشعار', () => {
-    toast({
-      title: 'تم التطبيق',
-      description: 'معاينة لإشعار تمبرينا باستخدام ملصق applied',
-      variant: 'applied',
+  // ---- cross-tab remote bulk -----------------------------------------------
+  // Remote mode is a toggle, not a menu action: each run action routes here
+  // when it is on. Targets advertise the kinds their own page can execute, and
+  // the target tab still runs its ordinary preview/arm/run pipeline locally.
+  const remoteRoot = backdrop.querySelector<HTMLElement>('[data-remote-root]')!
+  const remoteTargetIdInput = remoteRoot.querySelector<HTMLInputElement>('[data-remote-id]')!
+  const remoteTargetNote = remoteRoot.querySelector<HTMLElement>('[data-remote-target-note]')!
+  const remoteInput = remoteRoot.querySelector<HTMLTextAreaElement>('[data-remote-input]')!
+  const remoteRefreshBtn = remoteRoot.querySelector<HTMLButtonElement>('[data-remote-refresh]')!
+  const remotePrepareBtn = remoteRoot.querySelector<HTMLButtonElement>('[data-remote-prepare]')!
+  const remoteArmBtn = remoteRoot.querySelector<HTMLButtonElement>('[data-remote-arm]')!
+  const remoteRunBtn = remoteRoot.querySelector<HTMLButtonElement>('[data-remote-run]')!
+  const remoteStopBtn = remoteRoot.querySelector<HTMLButtonElement>('[data-remote-stop]')!
+  const remoteBadge = remoteRoot.querySelector<HTMLElement>('[data-remote-badge]')!
+  const remoteStatus = remoteRoot.querySelector<HTMLElement>('[data-remote-status]')!
+  const remoteKindNote = remoteRoot.querySelector<HTMLElement>('[data-remote-kind-note]')!
+
+  let remoteBridge: RemoteBulkBridge | null = null
+  let remoteTargets: RemoteTarget[] = []
+  let remoteFlowKey = ''
+  let remoteBusy = false
+  let remotePrepared = false
+  let remoteArmed = false
+  let remoteLastRequest: RemoteRequest | null = null
+  /** Set when the remote view was opened from a specific bulk action. */
+  let remoteKind: BulkRunKind | null = null
+
+  /**
+   * A run can still be executing in the target tab after our request times out.
+   * Keep this separate from remoteBusy so Stop stays reachable until the target
+   * confirms a run result or a stop request succeeds.
+   */
+  let remoteRunActive = false
+  let remoteRunContext: { to: string; kind: BulkRunKind; text: string } | null = null
+  let remoteRunRequestId: string | null = null
+  let remoteStopBusy = false
+  /** Ignore a stale request result after a newer action (especially Stop). */
+  let remoteRequestToken = 0
+
+  function remoteSupportedKinds(): RemoteBulkKind[] {
+    return supportedBulkKinds(location.pathname)
+  }
+
+  function selectedRemoteKind(): BulkRunKind | null {
+    return remoteKind
+  }
+
+  /** The lesson ID in the URL, or the lesson the current page is showing. */
+  function pageLessonId(): string {
+    return new URLSearchParams(location.search).get('lesson_id')?.trim()
+      || currentLessonIdFromPage() || ''
+  }
+
+  function examIdFromTargetPath(path: string): string {
+    try {
+      return examIdFromPath(new URL(path, location.href).pathname) ?? ''
+    } catch {
+      return ''
+    }
+  }
+
+  function selectedRemoteTarget(): RemoteTarget | null {
+    const kind = selectedRemoteKind()
+    if (!kind) return null
+    return remoteTargets.find((target) => remoteTargetMatches(target.path, kind, remoteTargetIdInput.value)) ?? null
+  }
+
+  function updateRemoteKindNote(): void {
+    remoteKindNote.hidden = !remoteKind
+    // Use the exact placeholders from the local panels, including every
+    // documented input format, so remote mode shows the same guidance.
+    const kind = selectedRemoteKind()
+    remoteInput.placeholder = kind === 'evaluation' || kind === 'exam-evaluation'
+      ? evalInput.placeholder || t('ui.bulk.eval.inputPlaceholder')
+      : bulkCodesInput.placeholder || t('ui.bulk.attendance.inputPlaceholder')
+  }
+
+  /** Enter remote mode for one chosen action. */
+  function openRemoteForKind(kind: BulkRunKind): void {
+    remoteKind = kind
+    remoteTargetIdInput.value = isExamBulkKind(kind) ? currentExamId() : pageLessonId()
+    remoteInput.value = ''
+    updateRemoteKindNote()
+    showBulkView('remote')
+    resetRemoteFlow()
+    refreshRemoteTargets()
+  }
+
+  function remotePhaseLabel(phase: RemoteBulkPhase): string {
+    if (phase === 'prepare') return t('ui.bulk.remote.prepare')
+    if (phase === 'arm') return t('ui.bulk.remote.arm')
+    if (phase === 'run') return t('ui.bulk.remote.run')
+    return t('ui.bulk.remote.stop')
+  }
+
+  function setRemoteBadge(text: string, className: string): void {
+    remoteBadge.textContent = text
+    remoteBadge.className = `feature-badge ${className}`
+  }
+
+  function renderRemoteStatus(): void {
+    if (!remoteLastRequest) {
+      remoteStatus.textContent = t('ui.common.previewEmpty')
+      return
+    }
+    const phase = remotePhaseLabel(remoteLastRequest.phase)
+    if (remoteLastRequest.status === 'pending') {
+      remoteStatus.textContent = t('ui.bulk.remote.sending', { p0: phase })
+    } else if (remoteLastRequest.status === 'error') {
+      remoteStatus.textContent = t('ui.bulk.remote.failed', { p0: remoteLastRequest.message || t('ui.common.error') })
+    } else if (remoteLastRequest.preview) {
+      remoteStatus.textContent = t('ui.bulk.remote.preview', {
+        p0: remoteLastRequest.preview.ready,
+        p1: remoteLastRequest.preview.invalid,
+        p2: remoteLastRequest.preview.needsDecision,
+      })
+    } else {
+      remoteStatus.textContent = t('ui.bulk.remote.done', { p0: phase })
+    }
+  }
+
+  function updateRemoteButtons(): void {
+    const kind = selectedRemoteKind()
+    const target = selectedRemoteTarget()
+    const valid = !!target && !!kind && remoteInputAllowed(kind, remoteInput.value)
+    const locked = remoteBusy || remoteStopBusy || remoteRunActive
+    // Never let an edit detach Stop from the request it is meant to stop.
+    remoteInput.readOnly = locked
+    remoteTargetIdInput.readOnly = locked
+    remoteRefreshBtn.disabled = locked
+    remotePrepareBtn.disabled = !valid || locked
+    remoteArmBtn.disabled = !valid || locked || !remotePrepared
+    remoteRunBtn.disabled = !valid || locked || !remoteArmed
+    remoteStopBtn.disabled = !remoteRunActive || remoteStopBusy
+
+    if (!remoteTargetIdInput.value.trim()) {
+      remoteTargetNote.textContent = t('ui.bulk.remote.enterId')
+    } else if (kind && !target) {
+      remoteTargetNote.textContent = t('ui.bulk.remote.noTargetForKind')
+    } else if (target) {
+      remoteTargetNote.textContent = t('ui.bulk.remote.targetForId', { p0: target.path })
+    } else {
+      remoteTargetNote.textContent = t('ui.bulk.remote.noTargets')
+    }
+
+    if (remoteRunActive) setRemoteBadge(t('ui.common.running'), 'busy')
+    else if (!target) {
+      setRemoteBadge(remoteKind
+        ? t('ui.bulk.remote.noTargetForKind')
+        : t('ui.bulk.remote.noTargets'), 'off')
+    }
+    else if (remoteBusy) setRemoteBadge(t('ui.common.running'), 'busy')
+    else if (remoteArmed) setRemoteBadge(t('ui.common.armed'), 'on')
+    else if (remotePrepared) setRemoteBadge(t('ui.common.ready'), 'on')
+    else setRemoteBadge(t('ui.common.unavailable'), 'off')
+  }
+
+  /** Clear a run that is deliberately being abandoned by a user action. */
+  function abandonRemoteRun(): void {
+    if (remoteBridge && remoteRunActive && remoteRunContext && !remoteStopBusy) {
+      // Best effort: tell the target to stop before we forget the context. It
+      // only presses its local Stop button and creates no new write path.
+      const { to, kind, text } = remoteRunContext
+      void remoteBridge.send({ to, kind, phase: 'stop', text }).catch(() => {})
+    }
+    // Invalidate any in-flight run/stop result so it cannot revive the old flow.
+    remoteRequestToken++
+    remoteRunActive = false
+    remoteRunContext = null
+    remoteRunRequestId = null
+    remoteStopBusy = false
+  }
+
+  function resetRemoteFlow(): void {
+    abandonRemoteRun()
+    remotePrepared = false
+    remoteArmed = false
+    remoteLastRequest = null
+    renderRemoteStatus()
+    updateRemoteButtons()
+  }
+
+  function refreshRemoteTargets(): void {
+    const advertised = remoteBridge?.targets() ?? []
+    const kind = selectedRemoteKind()
+    // The action kind already determines the page; only tabs that can execute
+    // it are candidates. The lesson/exam ID then picks the exact target URL.
+    remoteTargets = kind
+      ? advertised.filter((target) => target.kinds.includes(kind))
+      : advertised
+
+    // Exam actions are targeted by the exam ID in the target URL. If only one
+    // exam is advertised, fill it in so preview isn't blocked by an empty ID.
+    if (kind && isExamBulkKind(kind) && !remoteTargetIdInput.value.trim()) {
+      const ids = [...new Set(remoteTargets.map((target) => examIdFromTargetPath(target.path)).filter(Boolean))]
+      if (ids.length === 1) remoteTargetIdInput.value = ids[0]
+    }
+
+    const nextKind = selectedRemoteKind()
+    const target = selectedRemoteTarget()
+    const flowKey = `${target?.id ?? ''}:${nextKind ?? ''}:${remoteTargetIdInput.value.trim()}`
+    if (flowKey !== remoteFlowKey) {
+      remoteFlowKey = flowKey
+      // A target can expire while its run is still executing. Keep the run and
+      // its Stop context intact; only clear the idle preview/arm state.
+      if (!remoteRunActive) resetRemoteFlow()
+    }
+    updateRemoteButtons()
+  }
+
+  function remotePreview(kind: BulkRunKind): RemotePreview {
+    if (kind === 'attendance' || kind === 'exam-attendance') {
+      return {
+        ready: executableEntries().length,
+        invalid: bulkParsed?.invalid.length ?? 0,
+        needsDecision: unresolvedNameRows().length,
+      }
+    }
+    return {
+      ready: evalExecutableRows().length,
+      invalid: evalParsed?.invalid.length ?? 0,
+      needsDecision: evalRows.filter((row) => evalNeedsDecision(row)).length,
+    }
+  }
+
+  async function prepareRemoteTarget(request: RemoteRequest): Promise<RemoteRequest> {
+    // Target-side bypass: showBulkView only switches the view; routing by the
+    // remote toggle lives in the click handler, so this local switch is safe.
+    if (request.kind === 'attendance' || request.kind === 'exam-attendance') {
+      bulkCodesInput.value = request.text
+      showBulkView(request.kind === 'exam-attendance' ? 'exam-attendance' : 'attendance')
+      await analyzeBulkInput()
+    } else {
+      evalInput.value = request.text
+      showBulkView(request.kind === 'exam-evaluation' ? 'exam-evaluation' : 'evaluation')
+      analyzeEvaluationBulk()
+    }
+    const preview = remotePreview(request.kind)
+    return {
+      ...request,
+      status: 'done',
+      preview,
+      message: t('ui.bulk.remote.preview', {
+        p0: preview.ready,
+        p1: preview.invalid,
+        p2: preview.needsDecision,
+      }),
+    }
+  }
+
+  async function handleRemoteRequest(request: RemoteRequest): Promise<RemoteRequest> {
+    const notReady = (): RemoteRequest => ({ ...request, status: 'error', message: t('ui.bulk.remote.notReady') })
+    // Re-check the target's own page before touching any local bulk state.
+    if (!isBulkRunKind(request.kind)
+      || !supportedBulkKinds(location.pathname).includes(request.kind)) {
+      return { ...request, status: 'error', message: t('ui.bulk.remote.wrongTarget') }
+    }
+    // Stop must work while a run is in flight, when the ready-to-arm guards are
+    // deliberately false. It only presses the local Stop button; no write path.
+    if (request.phase === 'stop') {
+      if (request.kind === 'attendance' || request.kind === 'exam-attendance') {
+        if (bulkRunning) bulkStopBtn.click()
+      } else if (evalRunning) {
+        evalStopBtn.click()
+      }
+      return { ...request, status: 'done', message: t('ui.bulk.remote.stopped') }
+    }
+    if (!remoteInputAllowed(request.kind, request.text)) {
+      return { ...request, status: 'error', message: t('ui.bulk.exam.guard') }
+    }
+    if (request.phase === 'prepare') return prepareRemoteTarget(request)
+
+    if (request.kind === 'attendance' || request.kind === 'exam-attendance') {
+      const exam = request.kind === 'exam-attendance'
+      if (bulkExamMode !== exam || bulkCodesInput.value !== request.text || !bulkParsed || !readyToArm()) return notReady()
+      if (request.phase === 'arm') {
+        if (!bulkArmed) bulkArmBtn.click()
+        return bulkArmed ? { ...request, status: 'done' } : notReady()
+      }
+      if (request.phase === 'run') {
+        if (!bulkArmed || bulkRunning) return notReady()
+        await executeBulk()
+        if (!bulkRan) return notReady()
+        return bulkLogRows.some((row) => row.status === 'error')
+          ? { ...request, status: 'error', message: t('ui.bulk.remote.runFailed') }
+          : { ...request, status: 'done' }
+      }
+    } else {
+      const exam = request.kind === 'exam-evaluation'
+      if (evalExamMode !== exam || evalInput.value !== request.text || !evalParsed || !evalReadyToArm()) return notReady()
+      if (request.phase === 'arm') {
+        if (!evalArmed) evalArmBtn.click()
+        return evalArmed ? { ...request, status: 'done' } : notReady()
+      }
+      if (request.phase === 'run') {
+        if (!evalArmed || evalRunning) return notReady()
+        await executeEvaluationBulk()
+        if (!evalRan) return notReady()
+        return evalLogRows.some((row) => row.status === 'error')
+          ? { ...request, status: 'error', message: t('ui.bulk.remote.runFailed') }
+          : { ...request, status: 'done' }
+      }
+    }
+    return notReady()
+  }
+
+  async function sendRemotePhase(phase: RemoteBulkPhase): Promise<void> {
+    if (!remoteBridge) return
+
+    let to: string
+    let kind: BulkRunKind
+    let text: string
+    if (phase === 'stop') {
+      // Stop is tied to the run that was actually launched, even if the target
+      // advertisement expired or the run request already timed out locally.
+      if (!remoteRunActive || !remoteRunContext || remoteStopBusy) return
+      ;({ to, kind, text } = remoteRunContext)
+    } else {
+      const target = selectedRemoteTarget()
+      const selectedKind = selectedRemoteKind()
+      if (!target) {
+        toast({ title: t('ui.bulk.remote.chooseTarget'), variant: 'warning' })
+        return
+      }
+      if (!selectedKind || !remoteInputAllowed(selectedKind, remoteInput.value)) {
+        toast({ title: t('ui.bulk.remote.invalidInput'), variant: 'warning' })
+        return
+      }
+      if (remoteBusy) return
+      to = target.id
+      kind = selectedKind
+      text = remoteInput.value
+    }
+
+    const now = Date.now()
+    const token = ++remoteRequestToken
+    remoteLastRequest = {
+      id: '',
+      from: remoteBridge.selfId,
+      to,
+      kind,
+      phase,
+      text,
+      createdAt: now,
+      updatedAt: now,
+      status: 'pending',
+    }
+    if (phase === 'run') {
+      remoteRunActive = true
+      remoteRunContext = { to, kind, text }
+      remoteRunRequestId = null
+    }
+    if (phase === 'stop') remoteStopBusy = true
+    else remoteBusy = true
+    renderRemoteStatus()
+    updateRemoteButtons()
+
+    try {
+      const result = await remoteBridge.send({ to, kind, phase, text })
+      // A Stop request supersedes the run result. Never overwrite its outcome.
+      if (token !== remoteRequestToken) return
+      remoteLastRequest = result
+      if (result.status === 'done') {
+        if (phase === 'prepare') {
+          remotePrepared = true
+          remoteArmed = false
+        } else if (phase === 'arm') {
+          remoteArmed = true
+        } else if (phase === 'run' || phase === 'stop') {
+          remotePrepared = false
+          remoteArmed = false
+          remoteRunActive = false
+          remoteRunContext = null
+          remoteRunRequestId = null
+        }
+      } else if (result.status === 'error') {
+        // A timed-out run may still be executing in the target tab, so Stop
+        // stays available; a real target rejection means nothing is running.
+        const timedOut = Date.now() - now >= REQUEST_TIMEOUT_MS
+          || result.message === REQUEST_TIMEOUT_MESSAGE
+        if (phase === 'run') {
+          if (timedOut) remoteRunRequestId = result.id
+          else {
+            remoteRunActive = false
+            remoteRunContext = null
+            remoteRunRequestId = null
+          }
+        }
+        toast({
+          title: t('ui.bulk.remote.failed', { p0: remotePhaseLabel(phase) }),
+          description: result.message || t('ui.common.error'),
+          variant: 'error',
+        })
+      }
+    } catch (error) {
+      if (token !== remoteRequestToken) return
+      const message = error instanceof Error ? error.message : String(error)
+      remoteLastRequest = {
+        ...(remoteLastRequest ?? {
+          id: '', from: remoteBridge.selfId, to, kind, phase, text,
+          createdAt: now, updatedAt: now, status: 'error' as const,
+        }),
+        status: 'error',
+        message,
+      }
+      toast({
+        title: t('ui.bulk.remote.failed', { p0: remotePhaseLabel(phase) }),
+        description: message,
+        variant: 'error',
+      })
+    } finally {
+      if (phase === 'stop') {
+        // A failed Stop can be retried; a superseded one must not clear the
+        // busy flag of a newer Stop request.
+        if (token === remoteRequestToken) remoteStopBusy = false
+      } else {
+        remoteBusy = false
+      }
+      renderRemoteStatus()
+      updateRemoteButtons()
+    }
+  }
+
+  /** Consume a terminal target result that arrives after our local timeout. */
+  function syncRemoteRunResult(): void {
+    if (!remoteBridge || !remoteRunActive || !remoteRunRequestId || remoteStopBusy) return
+    const current = remoteBridge.request(remoteRunRequestId)
+    if (!current || current.phase !== 'run' || current.status === 'pending') return
+    if (current.status === 'error' && current.message === REQUEST_TIMEOUT_MESSAGE) return
+    remoteLastRequest = current
+    remotePrepared = false
+    remoteArmed = false
+    remoteRunActive = false
+    remoteRunContext = null
+    remoteRunRequestId = null
+    renderRemoteStatus()
+  }
+
+  remoteBridge = initRemoteBulk(remoteSupportedKinds)
+  remoteBridge.onChanged(() => {
+    syncRemoteRunResult()
+    refreshRemoteTargets()
+    renderRemoteStatus()
+    updateRemoteButtons()
+  })
+  remoteBridge.onRequest((request) => handleRemoteRequest(request))
+  refreshRemoteTargets()
+
+  remoteRefreshBtn.addEventListener('click', () => {
+    remoteBridge?.refresh()
+    refreshRemoteTargets()
+  })
+  remotePrepareBtn.addEventListener('click', () => { void sendRemotePhase('prepare') })
+  remoteArmBtn.addEventListener('click', () => { void sendRemotePhase('arm') })
+  remoteRunBtn.addEventListener('click', () => { void sendRemotePhase('run') })
+  remoteStopBtn.addEventListener('click', () => { void sendRemotePhase('stop') })
+  remoteInput.addEventListener('input', () => {
+    if (remoteInput.readOnly) {
+      remoteInput.value = remoteLastRequest?.text ?? remoteInput.value
+      return
+    }
+    resetRemoteFlow()
+  })
+  remoteTargetIdInput.addEventListener('input', () => {
+    if (remoteTargetIdInput.readOnly) return
+    resetRemoteFlow()
+    refreshRemoteTargets()
+  })
+  let menuCommandIds: (string | number)[] = []
+  function registerMenuCommands(): void {
+    // Captions are localized at registration time, so a locale switch must
+    // replace the existing commands rather than keep stale Arabic labels.
+    for (const id of menuCommandIds) {
+      try { GM_unregisterMenuCommand(id) } catch { /* manager lacks unregister support */ }
+    }
+    menuCommandIds = [
+      GM_registerMenuCommand(t('ui.menu.notificationPreview'), () => {
+        toast({
+          title: t('ui.menu.toastAppliedTitle'),
+          description: t('ui.menu.toastAppliedDesc'),
+          variant: 'applied',
+        })
+      }),
+      GM_registerMenuCommand(t('ui.menu.copyLastReport'), () => {
+        void copyPlainText(
+          bulkDiagnosticReport || t('ui.menu.noReportYet'),
+          t('ui.bulk.attendance.reportCopiedTitle'),
+          t('ui.bulk.attendance.reportCopiedDesc'),
+        )
+      }),
+      GM_registerMenuCommand(t('ui.menu.diagnoseHomework'), () => {
+        const report = diagnoseHomeworkButtons()
+        console.info('[Tamperina homework diagnostic]\n' + report)
+        void navigator.clipboard?.writeText(report).catch(() => {})
+        toast({
+          title: t('ui.menu.homeworkDiagnosticTitle'),
+          description: t('ui.menu.homeworkDiagnosticDesc'),
+          variant: 'info',
+          duration: 7000,
+        })
+      }),
+      GM_registerMenuCommand(t('ui.menu.undo'), () => void undoRedo.undo()),
+      GM_registerMenuCommand(t('ui.menu.redo'), () => void undoRedo.redo()),
+      GM_registerMenuCommand(t('ui.menu.toggleUndo'), () => undoRedo.setEnabled(!undoRedo.enabled)),
+      GM_registerMenuCommand(t('ui.menu.undoDiagnostic'), () => {
+        const info = undoRedo.debug()
+        if (info) console.table(info.observed)
+        toast({
+          title: t('ui.menu.tamperinaDiagnosticTitle'),
+          description: info
+            ? t('ui.menu.diagnosticInfo', { p0: info.path, p1: info.historyCount, p2: info.gradeBaselineCount, p3: info.observed.length })
+            : t('ui.menu.diagnosticUnavailable'),
+          variant: 'info',
+          duration: 9000,
+        })
+      }),
+      GM_registerMenuCommand(t('ui.menu.openSettings'), () => openModal()),
+      GM_registerMenuCommand(t('ui.menu.evalFind'), () => {
+        if (!isEvaluationPage() || !isFeatureEnabled('evaluation-find')) return
+        findBar.toggle()
+      }),
+      GM_registerMenuCommand(t('ui.menu.cancelClickThrough'), () => {
+        state.clickThrough = false
+        persist()
+        render()
+      }),
+    ]
+  }
+
+  /** Re-render every surface that baked translations into generated markup. */
+  function rerenderForLocale(): void {
+    host.dir = state.locale === 'en' ? 'ltr' : 'rtl'
+    applyTranslations(shadow)
+    // Re-apply state-dependent labels (play/pause, lock/unlock, pin tooltip,
+    // tab selection) that applyTranslations() resets to their generic form.
+    render() // also refreshes the feature list via renderFeatureIfNeeded()
+    renderBulkLog()
+    renderBulkAnalysis() // also refreshes the resolve panel via renderBulkResolve()
+    updateBulkButtons()
+    updateBulkInputPlaceholder()
+    refreshAttendanceExport()
+    renderEvalLog()
+    renderEvalResolve()
+    renderEvalAnalysis()
+    updateEvalBulkButtons()
+    renderRemoveLog()
+    renderRemovePreview()
+    updateRemoveButtons()
+    updateBulkExamLabels(currentBulkView)
+    updateExamStagePanel()
+    renderBulkMenu()
+    updateRemoteKindNote()
+    void applyWhatsappHold()
+    refreshRemoteTargets()
+    renderRemoteStatus()
+    updateRemoteButtons()
+    registerMenuCommands()
+  }
+
+  subscribeLocale(() => {
+    state.locale = getLocale()
+    rerenderForLocale()
+  })
+
+  // The shell state is one shared GM value, so a toggle flipped in another
+  // tab would otherwise be overwritten by this tab's next persist(). Keep the
+  // remote mode in step without pulling in unrelated per-tab UI state.
+  try {
+    GM_addValueChangeListener(SHELL_KEY, (_key, _oldValue, _newValue, remote) => {
+      if (!remote) return
+      const next = loadShell().remoteBulk
+      if (next === state.remoteBulk) return
+      state.remoteBulk = next
+      const toggle = featureList.querySelector<HTMLButtonElement>('[data-feature-id="remote-bulk"]')
+      if (toggle) {
+        toggle.setAttribute('aria-checked', String(next))
+        syncToggleCard(toggle, next)
+      }
+      if (currentBulkView !== 'menu') showBulkView('menu')
+      resetRemoteFlow()
+      renderBulkMenu()
     })
-  })
-  GM_registerMenuCommand('Tamperina — نسخ تقرير آخر دفعة حضور', () => {
-    void copyPlainText(
-      bulkDiagnosticReport || 'لا يوجد تقرير بعد — شغّل دفعة حضور أولًا.',
-      'تم نسخ تقرير التشخيص',
-      'الصق التقرير في رسالة المشكلة لتحديد السبب بالضبط.',
-    )
-  })
-  GM_registerMenuCommand('Tamperina — تشخيص أزرار الواجب', () => {
-    const report = diagnoseHomeworkButtons()
-    console.info('[Tamperina homework diagnostic]\n' + report)
-    void navigator.clipboard?.writeText(report).catch(() => {})
-    toast({
-      title: 'تشخيص أزرار الواجب',
-      description: 'تم نسخ التقرير — الصقه هنا، وراجع console (F12) إن لزم.',
-      variant: 'info',
-      duration: 7000,
-    })
-  })
-  GM_registerMenuCommand('Tamperina — تراجع (Ctrl+Z)', () => void undoRedo.undo())
-  GM_registerMenuCommand('Tamperina — إعادة (Ctrl+Y)', () => void undoRedo.redo())
-  GM_registerMenuCommand('Tamperina — تشغيل/إيقاف التراجع', () => undoRedo.setEnabled(!undoRedo.enabled))
-  GM_registerMenuCommand('Tamperina — تشخيص التراجع', () => {
-    const readDebug = (unsafeWindow as unknown as Record<string, unknown>)
-      .__tamperinaUndoRedoDebug as (() => ReturnType<UndoRedoController['debug']>) | undefined
-    const info = readDebug?.()
-    if (info) console.table(info.observed)
-    toast({
-      title: 'تشخيص تمبرينا',
-      description: info
-        ? `الصفحة ${info.path} · السجل ${info.historyCount} · أساس التقييم ${info.gradeBaselineCount} · طلبات ${info.observed.length}`
-        : 'معلومات التشخيص غير متاحة في هذه النافذة.',
-      variant: 'info',
-      duration: 9000,
-    })
-  })
-  GM_registerMenuCommand('Tamperina — فتح الإعدادات', () => openModal())
-  GM_registerMenuCommand('Tamperina — بحث التقييم (Ctrl+Alt+F)', () => {
-    if (!isEvaluationPage() || !isFeatureEnabled('evaluation-find')) return
-    findBar.toggle()
-  })
-  GM_registerMenuCommand('Tamperina — إلغاء النقر من خلال', () => {
-    state.clickThrough = false
-    persist()
-    render()
-  })
+  } catch {
+    // Managers without change listeners simply keep the previous behaviour.
+  }
+
+  registerMenuCommands()
+  wirePagePanels()
+  updateBulkExamLabels(currentBulkView)
+  updateExamStagePanel()
+  renderBulkMenu()
+  updateRemoteKindNote()
+  if (state.holdWhatsappUntilApproved) void applyWhatsappHold()
 
   render()
 }

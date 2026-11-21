@@ -3,6 +3,8 @@
  * M1: reversible attendance/grading actions.
  * M2: bulk attendance entry via the scan form.
  */
+import { t } from './i18n'
+
 export interface Feature {
   id: string
   label: string
@@ -13,14 +15,14 @@ export interface Feature {
 export const registeredFeatures: Feature[] = [
   {
     id: 'undo-redo',
-    label: 'التراجع وإعادة التنفيذ',
-    description: 'Ctrl+Z / Ctrl+Y لعمليات الحضور والتقييم (يدعم الإلغاء الجماعي)',
+    label: t('core.feature.undoRedo.label'),
+    description: t('core.feature.undoRedo.description'),
     defaultEnabled: true,
   },
   {
     id: 'bulk-attendance',
-    label: 'الإجراءات الجماعية',
-    description: 'حضور جماعي (أكواد/أسماء) مع تحليل وتسليح وتراجع دفعة واحدة، مع بنود جماعية أخرى',
+    label: t('core.feature.bulk.label'),
+    description: t('core.feature.bulk.description'),
     defaultEnabled: true,
   },
 ]

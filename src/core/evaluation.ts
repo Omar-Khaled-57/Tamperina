@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import { toast } from './toast'
 import { getUndoRedoController } from './undoRedo'
 
@@ -17,6 +18,8 @@ const HOMEWORK_WRAPPER_CLASS = 'tamperina-grade-buttons'
 const HIDDEN_SELECT_CLASS = 'tamperina-homework-select-hidden'
 const STYLE_ID = 'tamperina-evaluation-styles'
 const ROW_SELECTOR = '.evaluation-table tbody tr'
+const EXAM_ROW_SELECTOR = 'tr[data-grade-row]'
+const GRADE_ROW_SELECTOR = `${ROW_SELECTOR}, ${EXAM_ROW_SELECTOR}`
 
 interface GradeDefinition {
   key: GradeKey
@@ -101,6 +104,15 @@ export function isEvaluationPage(): boolean {
   return location.pathname.replace(/\/$/, '') === '/evaluation'
 }
 
+/** The comprehensive-exam page reuses grade rows but not the lesson evaluation UI. */
+export function isExamGradePage(): boolean {
+  return /^\/comprehensive-exams\/\d+\/?$/.test(location.pathname)
+}
+
+export function isGradePage(): boolean {
+  return isEvaluationPage() || isExamGradePage()
+}
+
 export function isEvaluationFeatureId(id: string): id is EvaluationFeatureId {
   return (FEATURE_IDS as string[]).includes(id)
 }
@@ -121,25 +133,31 @@ export function normalizeLabel(value: string): string {
 }
 
 export function evaluationRows(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(ROW_SELECTOR))
+  return Array.from(document.querySelectorAll<HTMLElement>(GRADE_ROW_SELECTOR))
 }
 
 export function rowCode(row: HTMLElement): string {
   const info = row.querySelector('.evaluation-student__info small')?.textContent?.trim() ?? ''
+  const examCode = row.matches(EXAM_ROW_SELECTOR)
+    ? (row.querySelector<HTMLElement>('td > small')?.textContent?.trim()
+      ?? [...(row.getAttribute('data-search') ?? '').trim().split(/\s+/)].reverse().find((bit) => /^\d+$/.test(bit)))
+    : ''
   return normalizeDigits(info.split('·')[0]?.trim() ?? '')
     || normalizeDigits(row.getAttribute('data-student-code') ?? '')
     || normalizeDigits(row.getAttribute('data-student-id') ?? '')
     || normalizeDigits(row.querySelector('.student-code')?.textContent?.trim() ?? '')
+    || normalizeDigits(examCode ?? '')
 }
 
 export function rowName(row: HTMLElement): string {
-  return row.querySelector('.evaluation-student__info strong')?.textContent?.trim() || ''
+  return row.querySelector('.evaluation-student__info strong')?.textContent?.trim()
+    || (row.matches(EXAM_ROW_SELECTOR) ? row.querySelector<HTMLElement>('td > strong')?.textContent?.trim() ?? '' : '')
 }
 
 export function rowLabel(row: HTMLElement): string {
   const name = rowName(row)
   const code = rowCode(row)
-  return name && code ? `${name} (${code})` : name || code || 'الطالب'
+  return name && code ? `${name} (${code})` : name || code || t('core.student.fallback')
 }
 
 // ---- toggles ----------------------------------------------------------------
@@ -209,7 +227,7 @@ export function selectRow(row: HTMLElement | null, options?: { silent?: boolean 
   if (row) {
     row.classList.add(SELECTED_CLASS)
     if (!options?.silent) {
-      toast({ title: 'تم تحديد الطالب', description: rowLabel(row), variant: 'info', duration: 2500 })
+      toast({ title: t('core.eval.toast.studentSelected'), description: rowLabel(row), variant: 'info', duration: 2500 })
     }
   }
   for (const listener of selectionListeners) listener()
@@ -297,7 +315,7 @@ export function findOptionByLabel(select: HTMLSelectElement, label: string): HTM
 export function setSelectValue(select: HTMLSelectElement, value: string): void {
   if (select.value === value) return
   // Remember the saved value before our write so Ctrl+Z can restore it.
-  const row = select.closest<HTMLElement>(ROW_SELECTOR)
+  const row = select.closest<HTMLElement>(GRADE_ROW_SELECTOR)
   if (row) getUndoRedoController().captureGradeBaseline(row)
   select.value = value
   select.dispatchEvent(new Event('input', { bubbles: true }))
@@ -516,7 +534,15 @@ export function initEvaluationTools(): void {
     applyHomeworkButtons()
   })
 
-  const observer = new MutationObserver(notifyRows)
-  observer.observe(document.documentElement, { childList: true, subtree: true })
-  applyHomeworkButtons()
+  // At document-start `documentElement` may not exist yet. `initialised` was
+  // already set above to prevent re-entry, so a throw here would permanently
+  // disable the observer and homework buttons. Defer instead of throwing.
+  const installObserver = (): void => {
+    if (!document.documentElement) return
+    const observer = new MutationObserver(notifyRows)
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+    applyHomeworkButtons()
+  }
+  if (document.documentElement) installObserver()
+  else document.addEventListener('DOMContentLoaded', installObserver, { once: true })
 }

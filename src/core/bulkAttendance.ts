@@ -1,4 +1,5 @@
 import { unsafeWindow } from '$'
+import { t } from './i18n'
 import { getUndoRedoController, recordFromAttendanceResponse } from './undoRedo'
 
 const CODE_RE = /^[A-Z0-9_-]{3,80}$/
@@ -98,6 +99,14 @@ export interface BulkRowResult {
   debug?: BulkRowDebug
 }
 
+/** Per-row values for the platform's own exam check-in form. */
+export interface ExamCheckinOptions {
+  paymentStatus?: 'paid' | 'exempt' | 'deferred'
+  amountPaid?: string
+  paymentNote?: string
+  source?: 'manual' | 'scanner' | 'camera' | 'image'
+}
+
 export interface BulkRunContext {
   lessonId: string
   paymentMode: PaymentMode
@@ -124,6 +133,11 @@ function normalizeDigits(value: string): string {
     .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
 }
 
+/** Normalize a user-entered student code to the form the platform expects. */
+export function normalizeStudentCode(value: string): string {
+  return normalizeDigits(value).trim().toUpperCase()
+}
+
 function normalizeName(value: string): string {
   return normalizeDigits(value)
     .replace(/\s+/g, ' ')
@@ -138,20 +152,29 @@ function describeInput(input: HTMLInputElement): string {
   return `input${id}${name}${type}` || 'input'
 }
 
-export function detectScanForm(): ScanFormInfo | null {
-  const form = (document.getElementById('scanForm')
-    ?? document.querySelector('form[action*="attendance"]')) as HTMLFormElement | null
+export function detectScanForm(preferExam = false): ScanFormInfo | null {
+  const examForm = document.getElementById('examScan') as HTMLFormElement | null
+  const form = (preferExam
+    ? examForm
+    : document.getElementById('scanForm')
+      ?? document.querySelector('form[action*="attendance"]')
+      ?? examForm) as HTMLFormElement | null
   if (!form) return null
 
-  const lessonId = form.dataset.voiceLessonId
-    ?? form.dataset.lessonId
-    ?? new URL(location.href).searchParams.get('lesson_id')
-    ?? null
+  const lessonId = form.id === 'examScan'
+    ? null
+    : form.dataset.voiceLessonId
+      ?? form.dataset.lessonId
+      ?? new URL(location.href).searchParams.get('lesson_id')
+      ?? null
   const studentsUrl = form.dataset.voiceStudentsUrl
     ?? form.dataset.studentsUrl
+    ?? examForm?.querySelector<HTMLInputElement>('#examStudent')?.dataset.studentsUrl
     ?? null
 
-  const selectors = [
+  const selectors = form.id === 'examScan'
+    ? ['input#examStudent', 'input[name="student"]']
+    : [
     'input[name="student"]',
     'input[name="code"]',
     'input[name="student_code"]',
@@ -344,7 +367,7 @@ export async function searchStudents(
   lessonId: string,
 ): Promise<StudentCandidate[] | { tooMany: true } | { error: string }> {
   const scan = detectScanForm()
-  if (!scan?.studentsUrl) return { error: 'رابط البحث عن الطلاب غير متاح في الصفحة.' }
+  if (!scan?.studentsUrl) return { error: t('data.search.noUrl') }
 
   try {
     const url = new URL(scan.studentsUrl, location.href)
@@ -356,10 +379,10 @@ export async function searchStudents(
       credentials: 'same-origin',
       headers: { Accept: 'application/json' },
     })
-    if (!response.ok) return { error: `تعذر البحث (${response.status})` }
+    if (!response.ok) return { error: t('data.search.failed', { p0: response.status }) }
 
     const json = await response.json()
-    if (!Array.isArray(json)) return { error: 'استجابة بحث غير متوقعة.' }
+    if (!Array.isArray(json)) return { error: t('data.search.unexpected') }
     if (json.length >= 100) return { tooMany: true }
 
     return json.map((item) => {
@@ -375,7 +398,7 @@ export async function searchStudents(
       }
     }).filter((c) => c.code || c.name)
   } catch (error) {
-    return { error: error instanceof Error ? error.message : 'تعذر الاتصال أثناء البحث.' }
+    return { error: error instanceof Error ? error.message : t('data.search.connectionFailed') }
   }
 }
 
@@ -390,7 +413,7 @@ function candidateMatchesQuery(candidate: StudentCandidate, query: string): bool
 export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<NameRow> {
   const query = row.query.trim()
   if (!query) {
-    return { ...row, status: 'not-found', candidates: [], message: 'الاسم فارغ.' }
+    return { ...row, status: 'not-found', candidates: [], message: t('data.name.empty') }
   }
 
   const result = await searchStudents(query, lessonId)
@@ -398,12 +421,12 @@ export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<
     return { ...row, status: 'error', candidates: [], message: result.error }
   }
   if ('tooMany' in result) {
-    return { ...row, status: 'too-many', candidates: [], message: 'نتائج كثيرة جدًا — حدّد الاسم أكثر أو استخدم الكود.' }
+    return { ...row, status: 'too-many', candidates: [], message: t('data.name.tooMany') }
   }
 
   const candidates = result
   if (!candidates.length) {
-    return { ...row, status: 'not-found', candidates: [], message: 'لم يتم العثور على طالب مطابق.' }
+    return { ...row, status: 'not-found', candidates: [], message: t('data.name.notFound') }
   }
 
   const exact = candidates.filter((c) => {
@@ -419,7 +442,7 @@ export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<
       code: c.code,
       studentName: c.name,
       candidates,
-      message: `تم التعرف: ${c.name} (${c.code || 'بدون كود'})`,
+      message: t('data.name.identified', { p0: c.name, p1: c.code || t('data.noCode') }),
     }
   }
 
@@ -431,7 +454,7 @@ export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<
       code: c.code,
       studentName: c.name,
       candidates,
-      message: `مطابقة واحدة: ${c.name} (${c.code || 'بدون كود'})`,
+      message: t('data.name.singleMatch', { p0: c.name, p1: c.code || t('data.noCode') }),
     }
   }
 
@@ -449,7 +472,7 @@ export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<
         code: chosen.code,
         studentName: chosen.name,
         candidates,
-        message: `تم الاختيار تلقائيًا: ${chosen.name} (${chosen.code || 'بدون كود'})`,
+        message: t('data.name.autoSelected', { p0: chosen.name, p1: chosen.code || t('data.noCode') }),
       }
     }
   }
@@ -458,7 +481,7 @@ export async function resolveNameEntry(row: NameRow, lessonId: string): Promise<
     ...row,
     status: 'ambiguous',
     candidates,
-    message: candidates.length > 1 ? 'يوجد أكثر من طالب مطابق — اختر الصحيح.' : 'تعذّر التأكد من المطابقة.',
+    message: candidates.length > 1 ? t('data.name.multipleMatches') : t('data.name.uncertainMatch'),
   }
 }
 
@@ -523,6 +546,51 @@ function submitScanForm(form: HTMLFormElement, input: HTMLInputElement): void {
   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
 }
 
+/**
+ * Apply a staged row to the platform's own exam form. The hidden `source` field
+ * is pinned because the page's submit handler always overwrites it with
+ * `manual`; keeping our value lets the platform fetch still send the chosen
+ * source without creating a second write path.
+ */
+function applyExamCheckinOptions(
+  form: HTMLFormElement,
+  options?: ExamCheckinOptions,
+): () => void {
+  if (!options) return () => {}
+
+  const setField = (element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null, value: string | undefined): void => {
+    if (!element || value === undefined) return
+    element.value = value
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+    element.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+  setField(form.querySelector<HTMLSelectElement>('select[name="payment_status"]'), options.paymentStatus)
+  setField(form.querySelector<HTMLInputElement>('input[name="amount_paid"]'), options.amountPaid)
+  setField(form.querySelector<HTMLTextAreaElement>('textarea[name="payment_note"]'), options.paymentNote)
+
+  const sourceInput = form.querySelector<HTMLInputElement>('input[name="source"]')
+  const chosenSource = options.source
+  if (!sourceInput || !chosenSource || chosenSource === 'manual') return () => {}
+
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+  if (!descriptor?.get || !descriptor.set) return () => {}
+  const originalGet = descriptor.get
+  const originalSet = descriptor.set
+  const originalValue = originalGet.call(sourceInput)
+  originalSet.call(sourceInput, chosenSource)
+  Object.defineProperty(sourceInput, 'value', {
+    configurable: true,
+    get: () => originalGet.call(sourceInput),
+    set: (next: string) => {
+      if (String(next) === chosenSource) originalSet.call(sourceInput, chosenSource)
+    },
+  })
+  return () => {
+    delete (sourceInput as unknown as { value?: string }).value
+    originalSet.call(sourceInput, originalValue)
+  }
+}
+
 /** Returns the CSRF token from the page meta tag (same-origin, safe). */
 function getCsrfToken(): string {
   return (document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? '').trim()
@@ -550,7 +618,7 @@ async function submitSchoolAttendance(
   if (!csrf) {
     return {
       ok: false,
-      message: 'تعذّر قراءة CSRF token من الصفحة.',
+      message: t('data.school.csrfMissing'),
       debug: { note: 'meta[name="csrf-token"] missing or empty' },
     }
   }
@@ -617,24 +685,27 @@ async function submitSchoolAttendance(
     debug.note = `fetch threw: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`
     return {
       ok: false,
-      message: err instanceof Error ? err.message : 'تعذّر الاتصال بالخادم.',
+      message: err instanceof Error ? err.message : t('data.school.connectionFailed'),
       debug,
     }
   }
 }
 
 export async function runBulkAttendance(options: {
-  entries: Array<{ code: string, label?: string }>
+  entries: Array<{ code: string, label?: string, exam?: ExamCheckinOptions }>
   signal: { stop: boolean }
   onRow: (row: BulkRowResult) => void
   timeoutMs?: number
   paymentMode?: PaymentMode
   paymentOverrides?: PaymentOverride[]
   lessonId?: string
+  /** Exam check-in uses the platform's own scan form; it is never a lesson bulk. */
+  target?: 'standard' | 'exam'
 }): Promise<BulkRunSummary> {
   const undoRedo = getUndoRedoController()
   const timeoutMs = options.timeoutMs ?? 10000
-  const paymentMode = options.paymentMode ?? 'center'
+  const examTarget = options.target === 'exam'
+  const paymentMode: PaymentMode = examTarget ? 'center' : (options.paymentMode ?? 'center')
   const overrideMap = new Map<string, PaymentOverride>(
     (options.paymentOverrides ?? []).map((o) => [o.studentCode.toUpperCase(), o]),
   )
@@ -672,7 +743,7 @@ export async function runBulkAttendance(options: {
       recordRow({
         code: '',
         status: 'error',
-        message: 'رقم الحصة غير معروف.',
+        message: t('data.school.lessonUnknown'),
         at: Date.now(),
         debug: { note: 'No lesson id from options, page form, or URL' },
       })
@@ -692,11 +763,11 @@ export async function runBulkAttendance(options: {
         break
       }
       if (known.has(code)) {
-        recordRow({ code, label: entry.label, status: 'skipped-known', message: 'مسجّل بالفعل', at: Date.now() })
+        recordRow({ code, label: entry.label, status: 'skipped-known', message: t('data.run.alreadyRegistered'), at: Date.now() })
         continue
       }
       if (queued.has(code)) {
-        recordRow({ code, label: entry.label, status: 'duplicate', message: 'مكرر في القائمة — لم يُرسل مرتين', at: Date.now() })
+        recordRow({ code, label: entry.label, status: 'duplicate', message: t('data.run.duplicateInList'), at: Date.now() })
         continue
       }
       queued.add(code)
@@ -712,8 +783,11 @@ export async function runBulkAttendance(options: {
     let index = 0
 
     const payLabelFor = (override: PaymentOverride | undefined): string => override ? {
-      paid: 'كامل', partial: 'جزئي', discounted: 'مخفض', forgotten: 'نسي/مؤجل',
-    }[override.status] : 'افتراضي الحصة'
+      paid: t('data.payment.paid'),
+      partial: t('data.payment.partial'),
+      discounted: t('data.payment.discounted'),
+      forgotten: t('data.payment.forgotten'),
+    }[override.status] : t('data.payment.default')
 
     const processEntry = async (entry: { code: string, label?: string }): Promise<void> => {
       const code = entry.code.toUpperCase()
@@ -759,7 +833,7 @@ export async function runBulkAttendance(options: {
           code,
           label: entry.label,
           status: 'created',
-          message: `تم التسجيل — ${payLabelFor(override)}`,
+          message: t('data.run.registeredWithPayment', { p0: payLabelFor(override) }),
           recordId: event.record.id,
           at: Date.now(),
           debug,
@@ -771,7 +845,7 @@ export async function runBulkAttendance(options: {
           code,
           label: entry.label,
           status: 'duplicate',
-          message: 'مسجّل بالفعل',
+          message: t('data.run.alreadyRegistered'),
           recordId: event.record.id,
           at: Date.now(),
           debug,
@@ -791,7 +865,7 @@ export async function runBulkAttendance(options: {
           code,
           label: entry.label,
           status: 'created',
-          message: `تم التسجيل — ${payLabelFor(override)} (تأكيد من الاستجابة)`,
+          message: t('data.run.registeredFromResponse', { p0: payLabelFor(override) }),
           recordId: record.id,
           at: Date.now(),
           debug: {
@@ -805,8 +879,8 @@ export async function runBulkAttendance(options: {
           label: entry.label,
           status: 'error',
           message: event === 'timeout'
-            ? 'تم الإرسال لكن لم يصل تأكيد قابل للتراجع — راجع السجل يدويًا'
-            : 'استجابة غير متوقعة من الخادم',
+            ? t('data.run.submittedNoUndo')
+            : t('data.run.unexpectedServerResponse'),
           at: Date.now(),
           debug: {
             ...debug,
@@ -833,7 +907,7 @@ export async function runBulkAttendance(options: {
             code: entry.code.toUpperCase(),
             label: entry.label,
             status: 'error',
-            message: `استثناء أثناء الإرسال: ${error instanceof Error ? error.message : String(error)}`,
+            message: t('data.run.submitException', { p0: error instanceof Error ? error.message : String(error) }),
             at: Date.now(),
             debug: {
               note: error instanceof Error ? error.stack ?? error.message : String(error),
@@ -853,7 +927,7 @@ export async function runBulkAttendance(options: {
         recordRow({
           code: '',
           status: 'error',
-          message: `توقف عامل إرسال: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`,
+          message: t('data.run.workerCrashed', { p0: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason) }),
           at: Date.now(),
           debug: { note: 'Worker-level rejection; remaining rows may not have been sent.' },
         })
@@ -865,11 +939,13 @@ export async function runBulkAttendance(options: {
 
   // ---- سنتر (center) mode: sequential scan-form loop (single input/form) ----
   const centerLessonId = options.lessonId ?? currentLessonIdFromPage() ?? ''
-  const centerKnown = new Set(
-    (centerLessonId
-      ? undoRedo.knownRecordCodesForLesson(centerLessonId)
-      : undoRedo.knownRecordCodes).map((c) => c.toUpperCase()),
-  )
+  const centerKnown = examTarget
+    ? new Set<string>()
+    : new Set(
+      (centerLessonId
+        ? undoRedo.knownRecordCodesForLesson(centerLessonId)
+        : undoRedo.knownRecordCodes).map((c) => c.toUpperCase()),
+    )
   let consecutiveTimeouts = 0
   for (const entry of options.entries) {
     const code = entry.code.toUpperCase()
@@ -879,17 +955,17 @@ export async function runBulkAttendance(options: {
     }
 
     if (centerKnown.has(code)) {
-      recordRow({ code, label: entry.label, status: 'skipped-known', message: 'مسجّل بالفعل', at: Date.now() })
+      recordRow({ code, label: entry.label, status: 'skipped-known', message: t('data.run.alreadyRegistered'), at: Date.now() })
       continue
     }
 
-    const scan = detectScanForm()
+    const scan = detectScanForm(examTarget)
     if (!scan) {
       recordRow({
         code,
         label: entry.label,
         status: 'error',
-        message: 'تعذّر العثور على نموذج/حقل الإدخال',
+        message: t('data.center.formNotFound'),
         at: Date.now(),
         debug: { note: `detectScanForm() returned null; path=${location.pathname}` },
       })
@@ -904,9 +980,15 @@ export async function runBulkAttendance(options: {
 
     scan.input.value = code
     const wait = waitForCode(code, timeoutMs)
-    submitScanForm(scan.form, scan.input)
+    const unpinExamOptions = examTarget ? applyExamCheckinOptions(scan.form, entry.exam) : () => {}
+    let result: Awaited<typeof wait.promise>
+    try {
+      submitScanForm(scan.form, scan.input)
+      result = await wait.promise
+    } finally {
+      unpinExamOptions()
+    }
 
-    const result = await wait.promise
     const debug: BulkRowDebug = {
       request: { path: 'page scan form', payload: { code, lesson_id: centerLessonId } },
       observer: result === 'timeout' ? 'timeout' : result.type,
@@ -917,7 +999,7 @@ export async function runBulkAttendance(options: {
         code,
         label: entry.label,
         status: 'timeout',
-        message: 'لم يصل تأكيد من الخادم',
+        message: t('data.center.noConfirmation'),
         at: Date.now(),
         debug: {
           ...debug,
@@ -936,12 +1018,14 @@ export async function runBulkAttendance(options: {
     consecutiveTimeouts = 0
 
     if (result.type === 'add') {
-      undoRedo.ensureAttendanceRecorded(result.record)
-      recordRow({ code, label: entry.label, status: 'created', message: 'تم التسجيل', recordId: result.record.id, at: Date.now(), debug })
+      // Exam check-ins have no confirmed delete route. The observer event is
+      // enough to confirm the write; never create an undo action for it.
+      if (!examTarget) undoRedo.ensureAttendanceRecorded(result.record)
+      recordRow({ code, label: entry.label, status: 'created', message: t('data.run.registered'), recordId: result.record.id, at: Date.now(), debug })
     } else if (result.type === 'duplicate') {
-      recordRow({ code, label: entry.label, status: 'duplicate', message: 'مسجّل بالفعل', recordId: result.record.id, at: Date.now(), debug })
+      recordRow({ code, label: entry.label, status: 'duplicate', message: t('data.run.alreadyRegistered'), recordId: result.record.id, at: Date.now(), debug })
     } else {
-      recordRow({ code, label: entry.label, status: 'error', message: 'استجابة غير متوقعة', at: Date.now(), debug })
+      recordRow({ code, label: entry.label, status: 'error', message: t('data.center.unexpectedResponse'), at: Date.now(), debug })
     }
 
     // Minimal pacing to let the form/site settle between submissions.
@@ -1019,5 +1103,5 @@ export function formatBulkDiagnosticReport(
 
 export function formatCandidate(candidate: StudentCandidate): string {
   const code = candidate.code ? ` (${candidate.code})` : ''
-  return `${candidate.name || 'طالب'}${code}`
+  return `${candidate.name || t('data.student')}${code}`
 }

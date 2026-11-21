@@ -77,9 +77,11 @@
 
 .shell {
   position: fixed;
-  left: 92%;
+  inset-inline-start: 92%;
   top: 88%;
-  transform: translate(-50%, -50%);
+  /* The anchor is logical, so the centering shift must follow the host
+     direction: right-anchored RTL needs +50%, left-anchored LTR needs -50%. */
+  transform: translate(50%, -50%);
   z-index: 2147483000;
   user-select: none;
 }
@@ -317,6 +319,12 @@
   transform: translateY(0) scale(1);
 }
 
+/* The header + tab strip form one top section; breathing room goes below it. */
+.modal-top {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-60);
+}
+
 .modal-head {
   display: flex;
   align-items: center;
@@ -492,6 +500,41 @@
   border: 1px solid var(--border);
   border-radius: 14px;
   background: rgba(255, 226, 198, 0.035);
+  transition: background-color 0.24s ease, border-color 0.24s ease, box-shadow 0.24s ease;
+}
+
+/* Thin dividers group the newer controls without adding another card. */
+.feature-separator {
+  height: 1px;
+  margin: 2px 6px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+
+.feature-card--new {
+  animation: tamperina-feature-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.feature-card--new.is-on {
+  border-color: rgba(242, 206, 170, 0.4);
+  background: rgba(242, 206, 170, 0.07);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+
+/* The glow is a transition on the live node, so it stays smooth even though
+   undo-history updates rebuild the rest of the feature list. */
+.feature-card.is-on .switch {
+  box-shadow: 0 0 0 3px rgba(242, 206, 170, 0.18);
+}
+
+@keyframes tamperina-feature-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feature-card--new {
+    animation: none;
+  }
 }
 
 .feature-head {
@@ -776,7 +819,8 @@
   align-items: center;
   gap: 12px;
   width: min(420px, calc(100vw - 32px));
-  padding: 10px 12px 10px 16px;
+  padding-block: 10px;
+  padding-inline: 16px 12px;
   border: 1px solid var(--border-60);
   border-inline-start: 3px solid var(--accent);
   border-radius: 16px;
@@ -825,6 +869,28 @@
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* Optional one-click handoff on a toast (copy codes/results). */
+.toast-action {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: rgba(242, 206, 170, 0.12);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.toast-action:hover,
+.toast-action:focus-visible {
+  background: var(--accent);
+  color: #17100b;
 }
 
 .toast-close {
@@ -914,15 +980,35 @@
   transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
 
-.bulk-item:not(.is-soon):hover {
+.bulk-item:not(.is-soon):not(:disabled):hover {
   background: rgba(242, 206, 170, 0.08);
   border-color: rgba(242, 206, 170, 0.3);
   transform: translateY(-1px);
 }
 
-.bulk-item.is-soon {
+.bulk-item.is-soon,
+.bulk-item.is-unavailable {
   cursor: default;
   opacity: 0.78;
+}
+
+.bulk-item.is-unavailable:hover {
+  background: rgba(255, 226, 198, 0.035);
+  border-color: var(--border);
+  transform: none;
+}
+
+/* Higher specificity than `.bulk-note` below so the bottom gap survives. */
+.bulk-note.bulk-mode-hint {
+  margin: 0 2px 12px;
+  padding: 8px 10px;
+  border-inline-start: 2px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(242, 206, 170, 0.06);
+}
+
+.bulk-mode-hint[hidden] {
+  display: none;
 }
 
 .bulk-item-text {
@@ -959,6 +1045,16 @@
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
+}
+
+.bulk-back::before {
+  content: '→';
+  font-size: 14px;
+  line-height: 1;
+}
+
+:host([dir='ltr']) .bulk-back::before {
+  content: '←';
 }
 
 .bulk-back:hover {
@@ -1032,6 +1128,10 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.bulk-actions .bulk-full {
+  grid-column: 1 / -1;
 }
 
 /* The export panel keeps its three actions on a single row. */
@@ -1183,6 +1283,133 @@
 .bulk-resolve {
   display: grid;
   gap: 10px;
+}
+
+.bulk-stage {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(232, 162, 74, 0.28);
+  border-radius: 12px;
+  background: rgba(232, 162, 74, 0.07);
+}
+
+.bulk-stage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bulk-stage-head strong {
+  display: block;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.bulk-stage-head small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.bulk-stage-table {
+  display: grid;
+  gap: 8px;
+}
+
+.bulk-stage-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-alpha);
+}
+
+.bulk-stage-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  grid-column: 1 / -1;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.bulk-stage-field,
+.bulk-stage-code {
+  display: grid;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+.bulk-stage-field > span,
+.bulk-stage-code > span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.bulk-stage-code input[readonly] {
+  opacity: 0.85;
+  cursor: default;
+}
+
+.bulk-stage-remove {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+/* Post-preview exam rows live in the normal review list (.bulk-resolve-item). */
+.bulk-stage-review {
+  display: grid;
+  gap: 10px;
+}
+
+.bulk-stage-review .bulk-resolve-item {
+  gap: 8px;
+}
+
+.bulk-stage-review-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.bulk-stage-review-fields .bulk-inline-pay-field {
+  display: grid;
+  gap: 4px;
+}
+
+.bulk-stage-review-fields .bulk-stage-review-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bulk-stage-review-fields .bulk-input {
+  min-inline-size: 96px;
+}
+
+.bulk-stage-review-fields .bulk-resolve-actions {
+  margin-inline-start: auto;
+}
+
+.bulk-stage-review-fields .bulk-stage-remove {
+  grid-column: auto;
+  justify-self: auto;
+}
+
+@media (min-width: 640px) {
+  .bulk-stage-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .bulk-resolve-item {
@@ -1725,4 +1952,27 @@
   border-color: var(--accent-2);
   color: var(--accent-ink);
   background: var(--accent);
+}
+
+/* --- English mode -----------------------------------------------------------
+   The shadow host switches to dir="ltr" when English mode is on. A few panels
+   pin themselves to rtl for the Arabic host platform, so override them here;
+   everything else inherits the host direction. */
+:host([dir='ltr']) {
+  direction: ltr;
+}
+
+:host([dir='ltr']) .shell {
+  transform: translate(-50%, -50%);
+}
+
+:host([dir='ltr']) .modal,
+:host([dir='ltr']) .find-bar {
+  direction: ltr;
+}
+
+/* The thumb offset is physical while its start position is logical, so it
+   must flip alongside the host direction. */
+:host([dir='ltr']) .switch[aria-checked='true'] span {
+  transform: translateX(16px);
 }

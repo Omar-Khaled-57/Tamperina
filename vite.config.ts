@@ -46,7 +46,7 @@ function loadRinaAssets(): Promise<Record<string, string>> {
 
 /**
  * Inlines every Rina image in public/rina (logo, toast stickers, future poses)
- * as trimmed lossless-WebP data URLs, keyed by filename without extension.
+ * as trimmed high-quality WebP data URLs, keyed by filename without extension.
  * Source files are never modified — dropping in a new image just works.
  */
 function rinaAssets() {
@@ -120,11 +120,20 @@ export default defineConfig(({ mode }) => {
             ? [
                 'https://mrahmedzakaria.online/attendance/scan',
                 'https://mrahmedzakaria.online/evaluation',
+                'https://mrahmedzakaria.online/comprehensive-exams/*',
                 'http://localhost:8080/*',
                 'http://127.0.0.1:8080/*',
               ]
             : ['https://mrahmedzakaria.online/*'],
-          grant: ['GM_getValue', 'GM_setValue', 'GM_registerMenuCommand', 'unsafeWindow'],
+          grant: [
+            'GM_getValue',
+            'GM_setValue',
+            'GM_addValueChangeListener',
+            'GM_removeValueChangeListener',
+            'GM_registerMenuCommand',
+            'GM_unregisterMenuCommand',
+            'unsafeWindow',
+          ],
           ...(isDev
             ? {}
             : {

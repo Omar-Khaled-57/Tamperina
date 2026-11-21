@@ -1,6 +1,6 @@
 {
   "name": "tamperina",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,15 +8,18 @@
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "build:dev": "vite build --mode dev",
-    "check": "npm run typecheck && npm run build && npm run build:dev && node --check dist/tamperina.user.js && node --check dist/tamperina.dev.user.js",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build && npm run build:dev && node --check dist/tamperina.user.js && node --check dist/tamperina.dev.user.js && node scripts/check-i18n.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "happy-dom": "^21.0.4",
     "lucide-static": "^1.76.0",
     "sharp": "^0.35.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
-    "vite-plugin-monkey": "^8.1.1"
+    "vite-plugin-monkey": "^8.1.1",
+    "vitest": "^5.1.1"
   }
 }

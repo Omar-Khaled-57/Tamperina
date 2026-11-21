@@ -1,5 +1,6 @@
 import { icons } from '../icons'
 import { evaluationRows, normalizeDigits, rowCode, rowLabel, selectRow, subscribeRows } from './evaluation'
+import { applyTranslations } from './i18n'
 
 export interface FindBar {
   toggle(open?: boolean): void
@@ -39,15 +40,16 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
   bar.innerHTML = `
     <div class="find-bar__row">
       <span class="find-bar__icon">${icons.search}</span>
-      <input class="find-bar__input" type="search" placeholder="ابحث في الطلاب..." aria-label="البحث في التقييم" autocomplete="off" spellcheck="false">
+      <input class="find-bar__input" type="search" data-i18n-placeholder="core.find.placeholder" data-i18n-aria="core.find.inputAria" autocomplete="off" spellcheck="false">
       <span class="find-bar__count" aria-live="polite">0/0</span>
-      <button type="button" class="find-bar__btn" data-find-prev aria-label="السابق" title="السابق (Shift+Enter)">${icons.chevronUp}</button>
-      <button type="button" class="find-bar__btn" data-find-next aria-label="التالي" title="التالي (Enter)">${icons.chevronDown}</button>
-      <button type="button" class="find-bar__btn" data-find-case aria-label="تطابق حالة الحروف" title="تطابق حالة الحروف" aria-pressed="false">Aa</button>
-      <button type="button" class="find-bar__btn" data-find-close aria-label="إغلاق" title="إغلاق (Esc)">${icons.close}</button>
+      <button type="button" class="find-bar__btn" data-find-prev data-i18n-aria="core.find.prevAria" data-i18n-title="core.find.prevTitle">${icons.chevronUp}</button>
+      <button type="button" class="find-bar__btn" data-find-next data-i18n-aria="core.find.nextAria" data-i18n-title="core.find.nextTitle">${icons.chevronDown}</button>
+      <button type="button" class="find-bar__btn" data-find-case data-i18n-aria="core.find.matchCase" data-i18n-title="core.find.matchCase" aria-pressed="false">Aa</button>
+      <button type="button" class="find-bar__btn" data-find-close data-i18n-aria="core.find.closeAria" data-i18n-title="core.find.closeTitle">${icons.close}</button>
     </div>
   `
   shadow.appendChild(bar)
+  applyTranslations(bar)
 
   const input = bar.querySelector<HTMLInputElement>('.find-bar__input')!
   const count = bar.querySelector<HTMLElement>('.find-bar__count')!
@@ -62,17 +64,31 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
   let lastExactSelection = ''
 
   const registry = getHighlightRegistry()
-  if (!registry) {
-    const style = document.createElement('style')
-    style.textContent = '::highlight(tamperina-find) { background: rgba(242,206,170,.65); color: #17100b; }'
-    document.head.appendChild(style)
+  // Highlight styling must live in document.head: both ::highlight() and the
+  // fallback classes target host-page nodes outside the shadow root. Inject it
+  // unconditionally (idempotently) so the Custom Highlights path is themed too.
+  const HIGHLIGHT_STYLE_ID = 'tamperina-find-highlight-style'
+  let highlightStyle = document.getElementById(HIGHLIGHT_STYLE_ID) as HTMLStyleElement | null
+  if (!highlightStyle) {
+    highlightStyle = document.createElement('style')
+    highlightStyle.id = HIGHLIGHT_STYLE_ID
+    highlightStyle.textContent = [
+      '::highlight(tamperina-find) { background: rgba(242,206,170,.35); }',
+      '::highlight(tamperina-find-current) { background: rgba(242,206,170,.65); color: #17100b; }',
+      '.tamperina-find-hit { background: rgba(242,206,170,.35) !important; }',
+      '.tamperina-find-current { background: rgba(242,206,170,.65) !important; color: #17100b !important; }',
+    ].join('\n')
+    document.head.appendChild(highlightStyle)
   }
 
   function clearHighlights(): void {
     document.querySelectorAll('.tamperina-find-hit, .tamperina-find-current').forEach((el) => {
       el.classList.remove('tamperina-find-hit', 'tamperina-find-current')
     })
-    try { registry?.delete('tamperina-find') } catch { /* custom highlight unsupported */ }
+    try {
+      registry?.delete('tamperina-find')
+      registry?.delete('tamperina-find-current')
+    } catch { /* custom highlight unsupported */ }
   }
 
   function highlightNode(ranges: Range[], node: Text, start: number, end: number): void {
@@ -89,9 +105,10 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
     if (!query) return
     // Preserve whitespace here so highlight indices map directly onto the text node.
     const needle = normalizeDigits(query).trim()
-    const ranges: Range[] = []
+    const rangesByRow = new Map<HTMLElement, Range[]>()
     for (const row of matches) {
       row.classList.add('tamperina-find-hit')
+      const rowRanges: Range[] = []
       for (const node of textNodesIn(row)) {
         const text = normalizeDigits(node.textContent ?? '')
         if (!text) continue
@@ -100,20 +117,39 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
         let from = 0
         let index: number
         while ((index = haystack.indexOf(target, from)) >= 0) {
-          highlightNode(ranges, node, index, index + target.length)
+          highlightNode(rowRanges, node, index, index + target.length)
           from = index + target.length
         }
       }
+      if (rowRanges.length) rangesByRow.set(row, rowRanges)
     }
-    if (registry && ranges.length) {
+
+    // Two named highlights so the active occurrence is visually distinct from
+    // the other matches (one shared name would paint them all identically).
+    const currentRow = current >= 0 ? matches[current] : undefined
+    const currentRanges = currentRow ? rangesByRow.get(currentRow) ?? [] : []
+    const otherRanges: Range[] = []
+    for (const [row, ranges] of rangesByRow) {
+      if (row !== currentRow) otherRanges.push(...ranges)
+    }
+    if (registry) {
       try {
         const HighlightCtor = (window as unknown as { Highlight?: new (...items: Range[]) => unknown }).Highlight
-        if (HighlightCtor) registry.set('tamperina-find', new HighlightCtor(...ranges))
+        if (HighlightCtor) {
+          if (otherRanges.length) registry.set('tamperina-find', new HighlightCtor(...otherRanges))
+          else registry.delete('tamperina-find')
+          if (currentRanges.length) {
+            registry.set('tamperina-find-current', new HighlightCtor(...currentRanges))
+          } else {
+            registry.delete('tamperina-find-current')
+          }
+        }
       } catch { /* custom highlight unsupported */ }
     }
-    if (current >= 0 && matches[current]) {
-      matches[current].classList.add('tamperina-find-current')
-      matches[current].scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (currentRow) {
+      currentRow.classList.add('tamperina-find-current')
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      currentRow.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' })
     }
   }
 
@@ -253,6 +289,8 @@ export function mountFindBar(shadow: ShadowRoot): FindBar {
     destroy() {
       if (hideTimer) window.clearTimeout(hideTimer)
       unsubscribe()
+      clearHighlights()
+      highlightStyle?.remove()
       bar.remove()
     },
   }

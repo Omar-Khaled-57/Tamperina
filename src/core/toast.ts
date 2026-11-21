@@ -1,13 +1,21 @@
 import rina from 'virtual:tamperina-rina'
 import { icons } from '../icons'
+import { t } from './i18n'
 
 export type ToastVariant = 'applied' | 'undo' | 'redo' | 'error' | 'warning' | 'info'
+
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
 
 export interface ToastOptions {
   title: string
   description?: string
   variant?: ToastVariant
   duration?: number
+  /** Optional one-click handoff (e.g. copy new codes). Dismisses after firing. */
+  action?: ToastAction
 }
 
 type ToastImpl = (options: ToastOptions) => void
@@ -29,7 +37,12 @@ export function attachToaster(shadow: ShadowRoot): void {
     shadow.appendChild(container)
   }
 
-  impl = ({ title, description, variant = 'applied', duration = 5000 }) => {
+  // Dismiss callbacks keyed by node so an evicted toast's timer is cancelled
+  // instead of later firing against a detached element.
+  const dismissers = new WeakMap<HTMLElement, () => void>()
+
+  impl = ({ title, description, variant = 'applied', duration = 5000, action }) => {
+    const actionHandler = action?.onClick
     const el = document.createElement('div')
     el.className = `toast toast-${variant}`
 
@@ -54,15 +67,33 @@ export function attachToaster(shadow: ShadowRoot): void {
     const close = document.createElement('button')
     close.type = 'button'
     close.className = 'toast-close'
-    close.title = 'إغلاق'
-    close.setAttribute('aria-label', 'إغلاق')
+    // Declarative attributes let applyTranslations(shadow) refresh toasts that
+    // are still on screen when the locale switch happens.
+    close.dataset.i18nTitle = 'core.toast.close'
+    close.dataset.i18nAria = 'core.toast.close'
+    close.title = t('core.toast.close')
+    close.setAttribute('aria-label', t('core.toast.close'))
     close.innerHTML = icons.close
 
-    el.append(icon, content, close)
+    let actionBtn: HTMLButtonElement | null = null
+    if (action) {
+      actionBtn = document.createElement('button')
+      actionBtn.type = 'button'
+      actionBtn.className = 'toast-action'
+      actionBtn.textContent = action.label
+    }
+
+    el.append(icon, content)
+    if (actionBtn) el.append(actionBtn)
+    el.append(close)
     container.appendChild(el)
 
     const items = Array.from(container.children)
-    if (items.length > 3) items[0].remove()
+    if (items.length > 3) {
+      const oldest = items[0] as HTMLElement
+      dismissers.get(oldest)?.()
+      oldest.remove()
+    }
 
     let dismissed = false
     let timer = 0
@@ -73,7 +104,17 @@ export function attachToaster(shadow: ShadowRoot): void {
       el.classList.add('leaving')
       window.setTimeout(() => el.remove(), 180)
     }
+    dismissers.set(el, dismiss)
     timer = window.setTimeout(dismiss, duration)
     close.addEventListener('click', dismiss)
+    if (actionBtn && actionHandler) {
+      actionBtn.addEventListener('click', () => {
+        try {
+          actionHandler()
+        } finally {
+          dismiss()
+        }
+      })
+    }
   }
 }

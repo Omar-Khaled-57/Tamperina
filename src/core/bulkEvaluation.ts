@@ -14,7 +14,9 @@ import {
   gradeFromOptionText,
   commitExamTyping,
   isEvaluationPage,
+  isExamGradePage,
 } from './evaluation'
+import { listSeparator, t } from './i18n'
 import { getUndoRedoController } from './undoRedo'
 
 export interface EvalStudentCandidate {
@@ -154,8 +156,8 @@ function splitLine(line: string): string[] {
 }
 
 function parseValues(tokens: string[]): { values: EvalValues; ambiguousNumbers: boolean; numberTokens?: [string, string]; error?: string } {
-  if (tokens.length === 0) return { values: {}, ambiguousNumbers: false, error: 'لا توجد قيم' }
-  if (tokens.length > 2) return { values: {}, ambiguousNumbers: false, error: 'حقول كثيرة' }
+  if (tokens.length === 0) return { values: {}, ambiguousNumbers: false, error: t('data.parse.noValues') }
+  if (tokens.length > 2) return { values: {}, ambiguousNumbers: false, error: t('data.parse.tooManyFields') }
 
   const classified = tokens.map((t) => {
     if (isGradeTextToken(t)) return { type: 'homework' as const, value: normalizeDigits(t).replace(/\s+/g, ' ').trim() }
@@ -164,7 +166,7 @@ function parseValues(tokens: string[]): { values: EvalValues; ambiguousNumbers: 
   })
 
   if (classified.some((c) => c.type === 'unknown')) {
-    return { values: {}, ambiguousNumbers: false, error: 'قيمة غير مفهومة' }
+    return { values: {}, ambiguousNumbers: false, error: t('data.parse.unknownValue') }
   }
 
   if (classified.length === 1) {
@@ -180,7 +182,7 @@ function parseValues(tokens: string[]): { values: EvalValues; ambiguousNumbers: 
   if (a.type === 'homework' && b.type === 'exam') return { values: { homework: a.value, exam: b.value }, ambiguousNumbers: false }
   if (a.type === 'homework' && b.type === 'homework') {
     // Two text grades are not a valid exam+homework pair for this bulk flow.
-    return { values: {}, ambiguousNumbers: false, error: 'درجتا واجب بدون درجة امتحان' }
+    return { values: {}, ambiguousNumbers: false, error: t('data.parse.twoHomeworkGrades') }
   }
   // Two numbers: ambiguous mapping, user must choose.
   return {
@@ -266,7 +268,7 @@ export function parseEvaluationEntries(text: string): ParseEvalResult {
 }
 
 export function collectPageCandidates(): EvalStudentCandidate[] {
-  if (!isEvaluationPage()) return []
+  if (!isEvaluationPage() && !isExamGradePage()) return []
   return evaluationRows().map((row) => ({
     code: normId(rowCode(row)),
     name: rowName(row),
@@ -293,7 +295,7 @@ export function matchIdentifier(identifier: string): { status: EvalResolveStatus
       return { status: 'ready', code: exact[0].code || undefined, studentName: exact[0].name, candidates: exact }
     }
     if (exact.length > 1) {
-      return { status: 'ambiguous', candidates: exact, message: 'الاسم مطابق لأكثر من طالب — اختر الصحيح' }
+      return { status: 'ambiguous', candidates: exact, message: t('data.eval.nameAmbiguous') }
     }
   }
 
@@ -307,19 +309,19 @@ export function matchIdentifier(identifier: string): { status: EvalResolveStatus
       return { status: 'ready', code: partial[0].code || undefined, studentName: partial[0].name, candidates: partial }
     }
     if (partial.length > 1 && partial.length <= 12) {
-      return { status: 'ambiguous', candidates: partial, message: 'وُجد أكثر من طالب مشابه — اختر الصحيح' }
+      return { status: 'ambiguous', candidates: partial, message: t('data.eval.nameSimilar') }
     }
     if (partial.length > 12) {
-      return { status: 'too-many', candidates: partial.slice(0, 12), message: 'نتائج كثيرة جدًا — حدّد الاسم أكثر' }
+      return { status: 'too-many', candidates: partial.slice(0, 12), message: t('data.eval.tooMany') }
     }
   }
 
   // Code-like but not found
   if (looksLikeCode(identifier)) {
-    return { status: 'not-found', candidates: [], message: 'لم يُعثر على هذا الكود في صفحة التقييم الحالية' }
+    return { status: 'not-found', candidates: [], message: t('data.eval.codeNotFound') }
   }
 
-  return { status: 'not-found', candidates: [], message: 'لم يُعثر على الطالب في صفحة التقييم الحالية' }
+  return { status: 'not-found', candidates: [], message: t('data.eval.studentNotFound') }
 }
 
 export function findRowForCode(code: string): HTMLElement | null {
@@ -339,7 +341,7 @@ export async function applyEvaluationToRow(
   if (values.exam != null) {
     const input = examScoreInput(row)
     if (!input) {
-      missing.push('درجة الامتحان')
+      missing.push(t('data.eval.missingExamGrade'))
     } else {
       setExamScore(row, values.exam)
       appliedAny = true
@@ -349,11 +351,11 @@ export async function applyEvaluationToRow(
   if (values.homework != null) {
     const hwSelect = homeworkSelect(row) ?? mainGradeSelect(row)
     if (!hwSelect) {
-      missing.push('درجة الواجب')
+      missing.push(t('data.eval.missingHomeworkGrade'))
     } else {
       const option = findOptionByLabel(hwSelect, values.homework)
       if (!option) {
-        missing.push(`خيار الواجب «${values.homework}»`)
+        missing.push(t('data.eval.homeworkOptionMissing', { p0: values.homework }))
       } else {
         setSelectValue(hwSelect, option.value)
         appliedAny = true
@@ -375,32 +377,32 @@ export async function applyEvaluationToRow(
     if (saveBtn && !(saveBtn as HTMLButtonElement).disabled) {
       saveBtn.click()
     } else {
-      const form = row.querySelector('form') ?? row.closest('form')
-      if (form) {
+      // Only a form scoped to this row is safe to submit. An ancestor form
+      // (row.closest('form')) may wrap the whole table/page — submitting it
+      // would fire a page-wide save with every other row's live values.
+      const form = row.querySelector('form')
+      if (form && row.contains(form) && typeof form.requestSubmit === 'function') {
         // Some pages auto-save on change; avoid double-submitting blindly.
-        // If a submit event is needed, requestSubmit is safer than submit().
-        if (typeof (form as HTMLFormElement).requestSubmit === 'function') {
-          // only if form looks row-scoped
-          if (row.contains(form) || form.contains(row)) (form as HTMLFormElement).requestSubmit()
-        }
+        // requestSubmit() is safer than submit() because it fires validation.
+        form.requestSubmit()
       }
     }
   } catch { /* best-effort */ }
 
   if (!appliedAny && missing.length) {
-    return { status: 'missing-field', message: `لم يُعثر على: ${missing.join('، ')}` }
+    return { status: 'missing-field', message: t('data.eval.notFoundList', { p0: missing.join(listSeparator()) }) }
   }
   if (appliedAny && missing.length) {
-    return { status: 'partial', message: `تم جزئيًا — تعذّر: ${missing.join('، ')}` }
+    return { status: 'partial', message: t('data.eval.partiallyApplied', { p0: missing.join(listSeparator()) }) }
   }
   if (!appliedAny) {
-    return { status: 'skipped', message: 'لا توجد قيم للتطبيق' }
+    return { status: 'skipped', message: t('data.eval.noValuesToApply') }
   }
   return { status: 'applied' }
 }
 
 export function formatEvalLabel(code?: string, name?: string, fallback?: string): string {
   if (name && code) return `${name} (${code})`
-  return name || code || fallback || 'طالب'
+  return name || code || fallback || t('data.student')
 }
 

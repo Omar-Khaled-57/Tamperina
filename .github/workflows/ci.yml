@@ -6,11 +6,14 @@ on:
     paths:
       - 'src/**'
       - 'public/**'
+      - 'dist/**'
       - 'vite.config.ts'
       - 'tsconfig.json'
       - 'package.json'
       - 'package-lock.json'
       - 'scripts/**'
+      - 'tests/**'
+      - 'vitest.config.ts'
       - '.github/workflows/**'
   workflow_dispatch:
 
@@ -50,21 +53,27 @@ jobs:
         run: npm run check
 
       - name: Bump patch version if the script changed
+        env:
+          PRE_HASH: ${{ steps.pre.outputs.hash }}
+          PRE_PKG: ${{ steps.pre.outputs.pkg }}
+          PRE_DIST: ${{ steps.pre.outputs.dist }}
         run: |
           HASH=$(sha256sum dist/tamperina.user.js | cut -d ' ' -f 1)
-          if [ "$HASH" = "${{ steps.pre.outputs.hash }}" ]; then
+          if [ "$HASH" = "$PRE_HASH" ]; then
             echo "Generated userscripts are unchanged; nothing to publish."
             exit 0
           fi
 
-          if [ "${{ steps.pre.outputs.pkg }}" = "${{ steps.pre.outputs.dist }}" ]; then
+          if [ "$PRE_PKG" = "$PRE_DIST" ]; then
             echo "No manual version bump detected; bumping patch version."
             node scripts/bump-version.mjs
-            npm install --package-lock-only --ignore-scripts
             npm run check
           else
-            echo "Using developer-bumped version ${{ steps.pre.outputs.pkg }}."
+            echo "Using developer-bumped version $PRE_PKG."
           fi
+          # Keep the lockfile's root version in sync with package.json in both
+          # branches; otherwise a developer bump leaves package-lock.json stale.
+          npm install --package-lock-only --ignore-scripts
 
       - name: Commit generated userscripts
         run: |
