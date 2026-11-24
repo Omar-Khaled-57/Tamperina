@@ -16,17 +16,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and adhe
 
 ## <img src="public/rina/note.png" width="90" align="center" /> About this file
 
-This changelog was started on **2026-11-21** at version **0.0.22**. Entries before that date were not recorded in a changelog, so the 0.0.22 entry below is a **reconstructed baseline**: it describes the feature set that is actually present in the code today, rather than inventing historical release notes. From here on, every version bump should add its own section.
+This changelog was started on **2026-11-21** at version **0.0.22**. Entries before that date were not recorded in a changelog, so the 0.0.22 entry below is a **reconstructed baseline**: it describes the feature set that was present in the code at that baseline, rather than inventing historical release notes. From here on, every version bump should add its own section.
 
 ---
 
-## <img src="public/rina/note.png" width="100" align="center" /> [Unreleased]
+## <img src="public/rina/update.png" width="100" align="center" /> [0.0.23] — 2026-11-24
 
 ### Added
 
 - Documentation suite under [`docs/`](docs/README.md): documentation hub, user guide, feature reference, architecture, developer guide, API reference and troubleshooting playbook.
-- Stylized README and this changelog. No userscript behavior changed in this documentation pass.
+- Stylized README and this changelog (documentation only; no userscript behavior changed in that pass).
+
+### Changed
+
 - The evaluation find bar now smoothly lifts toasts and the mascot launcher out of its way while open, then slides them back down when it closes (respecting reduced-motion settings).
+- Rina stickers are inlined at 256px with an alpha-scan trim instead of `sharp.trim()` on the full-size originals. Builds dropped from ~8s to ~1.2s, both userscripts from ~4.5MB to ~1MB, and the `PLUGIN_TIMINGS` warning is gone. On-screen art is unchanged at its 120px launcher / 64px toast sizes.
 
 ---
 
@@ -86,7 +90,7 @@ This changelog was started on **2026-11-21** at version **0.0.22**. Entries befo
 
 - **Exam check-ins are not undoable:** the observed `POST /comprehensive-exams/<id>/check-in` has no confirmed delete route; replaying a generic attendance delete would target the wrong resource.
 - **Walk-in registrations are not undoable:** they create a student and a collection through the platform's own form.
-- **Homework buttons are hard-disabled in v0.0.22:** `isFeatureEnabled('homework-buttons')` returns `false` unconditionally; the native homework dropdown is left alone. The save machinery and diagnostic remain in the code.
+- **Homework buttons are hard-disabled at this baseline:** `isFeatureEnabled('homework-buttons')` returns `false` unconditionally; the native homework dropdown is left alone. The save machinery and diagnostic remain in the code.
 - **Bulk attendance is automation, not an API:** center mode loops the scan form and school mode posts one student at a time; runtime depends on the platform's own markup staying stable.
 - **Remote mode needs two enabled tabs:** the source tab sends commands, the target tab must remain open on the matching page and execute the run.
 
@@ -95,5 +99,5 @@ This changelog was started on **2026-11-21** at version **0.0.22**. Entries befo
 ---
 
 <div align="center">
-  <sub>Release notes for v0.0.22 · see <a href="docs/README.md">docs/</a> for the full manual.</sub>
+  <sub>Release notes for v0.0.23 · see <a href="docs/README.md">docs/</a> for the full manual.</sub>
 </div>

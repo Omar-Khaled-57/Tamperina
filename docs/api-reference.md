@@ -146,7 +146,7 @@ interface UndoRedoController {
 | `EvaluationFeatureId` | `'student-select' \| 'evaluation-find' \| 'homework-buttons'` |
 | `GradeKey` | `'امتياز' \| 'جيد جدا' \| 'جيد' \| 'مقبول' \| 'ضعيف' \| 'الواجب ناقص'` |
 | `initEvaluationTools()` | `void` — idempotent; installs click-to-select, styles, grade listeners, popstate reset, MutationObserver |
-| `isFeatureEnabled(id)` | `boolean` — `localStorage['tamperina_' + id]`, `null` → `true`; `homework-buttons` always `false` in v0.0.22 |
+| `isFeatureEnabled(id)` | `boolean` — `localStorage['tamperina_' + id]`, `null` → `true`; `homework-buttons` always `false` in v0.0.23 |
 | `setFeatureEnabled(id, enabled)` | `void` — persists and notifies |
 | `subscribeFeatures(listener)` / `subscribeSelection(listener)` / `subscribeRows(listener)` | unsubscribe functions |
 | `evaluationRows()` | `HTMLTableRowElement[]` — `.evaluation-table tbody tr, tr[data-grade-row]` |
@@ -353,6 +353,8 @@ function parseBridgeState(raw: unknown): BridgeState   // { tabs, requests }
 | `MAX_TEXT` | `100_000` |
 | `MAX_MESSAGE` | `1_000` |
 
+Only `REQUEST_TIMEOUT_MS` and `REQUEST_TIMEOUT_MESSAGE` are exported; the other constants above are module-private.
+
 ---
 
 ## `src/core/i18n.ts`
@@ -365,9 +367,10 @@ function parseBridgeState(raw: unknown): BridgeState   // { tabs, requests }
 | `MessageKey` | `keyof typeof catalog` (549 keys at this baseline) |
 | `getLocale()` / `setLocale(locale)` / `subscribeLocale(listener)` | Locale state |
 | `listSeparator()` | `', '` (en) or `'، '` (ar) |
-| `interpolate(text, vars?)` | Replace `{{name}}` placeholders |
 | `t(key, vars?)` | Translate; unknown key returns the key |
 | `applyTranslations(root)` | Handle `data-i18n`, `data-i18n-title`, `data-i18n-aria`, `data-i18n-placeholder` |
+
+`interpolate(text, vars?)` is an internal helper used by `t()` to replace `{{name}}` placeholders; it is not exported.
 
 ---
 

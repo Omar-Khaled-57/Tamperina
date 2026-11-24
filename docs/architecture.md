@@ -179,7 +179,7 @@ Key details:
 | GM value | `tamperina.whatsapp.heldByTamperina.v1` | Ownership marker for the WhatsApp worker. |
 | GM value | `tamperina.remoteBulk.v1` | Bridge tab advertisements and requests. |
 | localStorage | `tamperina_center_modal`, `tamperina_barcode_hidden` | Page-effect toggles. |
-| localStorage | `tamperina_student-select`, `tamperina_evaluation-find`, `tamperina_homework-buttons` | Evaluation flags (`null` means on; homework buttons always off in v0.0.22). |
+| localStorage | `tamperina_student-select`, `tamperina_evaluation-find`, `tamperina_homework-buttons` | Evaluation flags (`null` means on; homework buttons always off in v0.0.23). |
 | sessionStorage (host page) | `tamperina.undoRedo.session.v1` | Past/future actions, cached records, grade baselines, recorded ids, current lesson. |
 | sessionStorage (host page) | `tamperina.bulk.lastRun.v1` | Last attendance report, rows, input, lesson, mode and overrides. |
 

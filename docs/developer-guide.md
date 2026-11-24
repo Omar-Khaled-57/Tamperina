@@ -37,7 +37,7 @@ npm run check
 
 `build.emptyOutDir` is `false` so production and DEV artifacts coexist. `publicDir` is `false`: nothing under `public/` is copied verbatim. Instead:
 
-- **`rinaAssets()`** (plugin `tamperina-rina-assets`) reads every `.png` / `.webp` in `public/rina/`, trims transparent padding with `sharp.trim({ background: '#00000000', threshold: 5 })`, encodes WebP (`quality: 95`, `alphaQuality: 100`, `effort: 4`) and exposes a virtual module `virtual:tamperina-rina` mapping basename → `data:image/webp;base64,…`. Source images are never modified.
+- **`rinaAssets()`** (plugin `tamperina-rina-assets`) reads every `.png` / `.webp` in `public/rina/`, downscales it to 256px (2× the 120px launcher size), trims transparent padding by scanning the alpha channel of that small copy, encodes WebP (`quality: 95`, `alphaQuality: 100`, `effort: 4`) and exposes a virtual module `virtual:tamperina-rina` mapping basename → `data:image/webp;base64,…`. Source images are never modified. Trimming on the downscaled copy replaces `sharp.trim()` on the full-size originals, which dominated build time.
 - **`cairoFontCss()`** (plugin `tamperina-cairo-font`) inlines the three Cairo woff2 subsets from `public/fonts/` into a virtual `virtual:tamperina-fonts` module with `@font-face` rules and explicit `unicode-range`s. At runtime `ensureCairoFont()` registers the decoded bytes through the `FontFace` API so host CSP rules do not block them.
 - **`monkey()`** emits the userscript headers and outputs the two files.
 
@@ -140,7 +140,7 @@ Docs and the userscript reference images by **source path**, so GitHub renders t
 
 | Location | Build behavior | Recommended contents |
 |---|---|---|
-| `public/rina/` | Every `.png`/`.webp` is trimmed, WebP-encoded and **inlined into the userscript**, keyed by basename. `logo` is the launcher; `applied` and mapped stickers are used by toasts. | Small transparent stickers only |
+| `public/rina/` | Every `.png`/`.webp` is downscaled to 256px, trimmed via an alpha-channel scan, WebP-encoded and **inlined into the userscript**, keyed by basename. `logo` is the launcher; `applied` and mapped stickers are used by toasts. | Small transparent stickers only |
 | `public/media/` | Not inlined, not copied — used by Markdown only. | Wide screenshots and banners |
 
 The documentation set currently asks for the following files. Everything marked **core** is referenced in README/CHANGELOG/docs today; missing files render as broken images on GitHub.
@@ -157,7 +157,7 @@ The documentation set currently asks for the following files. Everything marked 
 
 ### Core stickers — `public/rina/*.png`
 
-Use the PNG source files directly in Markdown so links work on GitHub. The userscript build trims transparent padding, encodes each source as WebP, and embeds it; it never modifies the PNGs. The current sticker set is reused across headings and UI states instead of requiring a separate image for every section.
+Use the PNG source files directly in Markdown so links work on GitHub. The userscript build downscales each source to 256px, trims transparent padding from that small copy, encodes it as WebP, and embeds it; it never modifies the PNGs. The current sticker set is reused across headings and UI states instead of requiring a separate image for every section.
 
 | File | Best fit in docs and app |
 |---|---|---|

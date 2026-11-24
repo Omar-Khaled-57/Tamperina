@@ -149,7 +149,7 @@ Press `Ctrl+Alt+F` on `/evaluation` to open a Firefox-style search bar at the bo
 
 ### Homework buttons
 
-The glowing homework-grade button replacement is present in the code but disabled in v0.0.22 so the page's native dropdown stays in charge. The menu's homework diagnostic command still reports what Tamperina detects, and **bulk evaluation** can apply a homework grade from pasted input.
+The glowing homework-grade button replacement is present in the code but hard-disabled in v0.0.23 so the page's native dropdown stays in charge. The menu's homework diagnostic command still reports what Tamperina detects, and **bulk evaluation** can apply a homework grade from pasted input.
 
 ---
 

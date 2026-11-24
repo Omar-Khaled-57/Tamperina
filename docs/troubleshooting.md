@@ -102,7 +102,7 @@ A missing observer event is logged, not fatal: in school mode the POST response 
 | Find bar will not open | `Ctrl+Alt+F` works only on `/evaluation` with the find switch on. Plain `Ctrl+F` is left to the browser. |
 | Four-digit code does not select | The query must normalize to exactly four digits and match a row code. This works even when selection is off; press `Enter` to hand off to the student. |
 | Highlights do not appear | The browser may not support CSS Custom Highlights; Tamperina falls back to row classes. Styling is injected into `document.head`. |
-| Homework buttons missing | Expected in v0.0.22 — the feature is hard-disabled. Bulk evaluation can still set the homework grade; the menu diagnostic reports what was detected. |
+| Homework buttons missing | Expected in v0.0.23 — the feature is hard-disabled. Bulk evaluation can still set the homework grade; the menu diagnostic reports what was detected. |
 
 ---
 
@@ -136,7 +136,7 @@ A missing observer event is logged, not fatal: in school mode the POST response 
 
 - **Exam check-ins are not undoable.** `POST /comprehensive-exams/<id>/check-in` has no confirmed delete route; replaying `DELETE /attendance/:id` would target the wrong resource.
 - **Walk-in registrations are not undoable.** They create a student and a collection through the platform's own form.
-- **Homework buttons are hard-disabled in v0.0.22.** `isFeatureEnabled('homework-buttons')` returns `false` unconditionally; the native homework dropdown is left alone. The grade machinery, bulk homework grades and the diagnostic remain.
+- **Homework buttons are hard-disabled in v0.0.23.** `isFeatureEnabled('homework-buttons')` returns `false` unconditionally; the native homework dropdown is left alone. The grade machinery, bulk homework grades and the diagnostic remain.
 - **Bulk attendance depends on platform markup.** Center mode drives the scan form; school mode posts one student at a time with concurrency 5. A platform redesign can break form detection (`detectScanForm()`) or student search.
 - **Remote mode needs a live target tab.** It is a GM-value protocol, not a server; closing the target tab or losing heartbeat advertisements stops discovery.
 - **Session-scoped history.** Undo history and the last bulk report live in `sessionStorage` and are lost when the tab/browser closes.

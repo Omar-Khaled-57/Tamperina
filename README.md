@@ -6,7 +6,7 @@
 
 <div align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/Omar-Khaled-57/Tamperina/ci.yml?branch=main&style=flat-square&label=CI%2FCD" alt="CI/CD" />
-  <img src="https://img.shields.io/badge/version-0.0.22-blue?style=flat-square" alt="Version 0.0.22" />
+  <img src="https://img.shields.io/badge/version-0.0.23-blue?style=flat-square" alt="Version 0.0.23" />
   <img src="https://img.shields.io/badge/Tampermonkey-userscript-4c5a70?style=flat-square" alt="Tampermonkey userscript" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript strict" />
   <img src="https://img.shields.io/badge/Vite-8-646cff?style=flat-square&logo=vite&logoColor=white" alt="Vite 8" />
@@ -17,7 +17,7 @@
 
 <br />
 
-## <img src="public/rina/update.png" width="76" align="center" /> Latest release: 0.0.22
+## <img src="public/rina/update.png" width="76" align="center" /> Latest release: 0.0.23
 
 **One mascot, one modal, four tool families.** Tamperina ships as a single self-contained userscript: a pixel launcher that lives in the corner of the Ahmed Zakaria platform, a toggles panel, and a growing set of small workflow tools that all drive the platform's own forms and requests — never a separate backend.
 
@@ -47,7 +47,7 @@ Everything is deliberately *additive*: Tamperina does not replace the platform's
 
 > **M3 — Evaluation tools.** Three new independent switches in **المفاتيح**, active on `/evaluation`: select a student and grade them with hotkeys, a Firefox-style find bar on `Ctrl+Alt+F` (4-digit ID auto-selects a student), and glowy homework-grade buttons. All of them set the page's own controls and dispatch `change`, so the platform's auto-save and Tamperina's undo/redo keep working.
 >
-> <img src="public/rina/note.png" width="32" align="center" /> **Implementation note (v0.0.22):** the homework-buttons switch is currently hard-disabled in code while the page's native homework dropdown is being kept. Student selection, grade hotkeys (including `الواجب ناقص`), the find bar, and bulk homework grades still work. The diagnostic command for homework buttons remains available. See [Known limitations](docs/troubleshooting.md#known-limitations).
+> <img src="public/rina/note.png" width="32" align="center" /> **Implementation note (v0.0.23):** the homework-buttons switch is currently hard-disabled in code while the page's native homework dropdown is being kept. Student selection, grade hotkeys (including `الواجب ناقص`), the find bar, and bulk homework grades still work. The diagnostic command for homework buttons remains available. See [Known limitations](docs/troubleshooting.md#known-limitations).
 
 > **M4 — Exam tools.** Three more persisted switches, all off by default. **لوحة حضور الامتحان القابلة للتعديل** is available on every page and reveals an editable stage table on any `/comprehensive-exams/<id>` page: add/remove rows for any student code, include/exclude, payment status, amount, payment note, and check-in source. Edits disarm the run; Confirm still submits through the platform's own `#examScan` form. **إيقاف رسائل واتساب حتى الموافقة** stops the WhatsApp worker and shows an in-page notice inside the exam work area on `/comprehensive-exams/*`; Tamperina only resumes a worker it stopped itself. **الأوامر الجماعية عن بُعد** is a mode toggle: when on, the four bulk run actions (attendance, evaluation, exam attendance, exam grading) execute in a target tab and can be launched from any page; when off, each action is only available on its own page. It is not a separate menu action. The target tab still runs the shared preview → arm → run pipeline and keeps its undo history; exam actions accept any student and any exam, matched by the exam ID in the target URL.
 
@@ -61,7 +61,7 @@ Install from the raw GitHub URL so Tampermonkey can auto-update:
 https://raw.githubusercontent.com/Omar-Khaled-57/Tamperina/main/dist/tamperina.user.js
 ```
 
-For live testing, build with `npm run build:dev` and re-import `dist/tamperina.dev.user.js`. The DEV build matches the two live feature pages directly and has no update URL, so Tampermonkey will not refresh it automatically. If both DEV and production builds are enabled at the same time, they share one network-observer controller via `unsafeWindow`, so actions are only recorded once.
+For live testing, build with `npm run build:dev` and re-import `dist/tamperina.dev.user.js`. The DEV build matches the three live feature pages (`/attendance/scan`, `/evaluation`, `/comprehensive-exams/*`) plus `localhost:8080/*` and `127.0.0.1:8080/*`, and has no update URL, so Tampermonkey will not refresh it automatically. If both DEV and production builds are enabled at the same time, they share one network-observer controller via `unsafeWindow`, so actions are only recorded once.
 
 > <img src="public/rina/note.png" width="36" align="center" /> Full setup, per-browser notes, and the first-run checklist live in the [User Guide](docs/user-guide.md#install-and-update).
 
@@ -80,7 +80,7 @@ For live testing, build with `npm run build:dev` and re-import `dist/tamperina.d
 | `Ctrl+Z` / `⌘+Z` | Undo the last recorded attendance, grading, or bulk-batch action |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo the last undone action |
 | Focused input on `/attendance/scan` | Undo/redo shortcuts still run Tamperina instead of the browser's text undo |
-| `Esc` / backdrop click | Close the modal, close the find bar, or clear the selected student (in that order) |
+| `Esc` / backdrop click | Close the find bar, close the modal, or clear the selected student (in that order) |
 | `Ctrl+Alt+F` (on `/evaluation`) | Toggle the evaluation find bar; plain `Ctrl+F` stays with the browser |
 
 Open the mascot and use the **المفاتيح** tab to turn Undo/Redo on or off, run undo/redo with buttons, and inspect the per-action log. The toggle is the explicit arming step; undoing a single action does not open a confirmation dialog because the action is itself reversible and every result is confirmed by a toast. History is stored in `sessionStorage`, so it survives page reloads and navigation inside the platform and stays available until the tab or browser is closed. Ctrl+Z / Ctrl+Y work on any page where Tamperina runs as long as there is history.
@@ -104,7 +104,7 @@ Digits and `.` type into the selected student's **exam score** (`7.5` works, Ara
 
 **شريط البحث في التقييم** — `Ctrl+Alt+F` opens a Firefox-style bar at the bottom. It searches all student rows, highlights matches, and `Enter` / `Shift+Enter` move between them; `Esc` closes it. A query of exactly four digits (Latin or Arabic) selects the matching student automatically, even if the selection toggle is off. Press `Enter` to hand off to that student: the find bar closes and the next keys grade them (e.g. `1214`, `Enter`, `10` sets exam score 10). `Shift+Enter` still moves between matches.
 
-**أزرار تقييم الواجب** — the code and diagnostics for glowing homework buttons are present, but the feature is switched off in v0.0.22 so the page's native homework dropdown stays untouched. Bulk evaluation can still apply a homework grade from pasted input. See the [evaluation tools section](docs/user-guide.md#evaluation-tools) and the [shortcut matrix](docs/feature-reference.md#shortcut-matrix).
+**أزرار تقييم الواجب** — the code and diagnostics for glowing homework buttons are present, but the feature is hard-disabled in the current build so the page's native homework dropdown stays untouched. Bulk evaluation can still apply a homework grade from pasted input. See the [evaluation tools section](docs/user-guide.md#evaluation-tools) and the [shortcut matrix](docs/feature-reference.md#shortcut-matrix).
 
 ### Bulk actions
 
@@ -202,7 +202,7 @@ npm run build
 
 Run `npm test` for the Vitest suite (pure guards, parsers, persisted-state validation, cross-tab protocol, and UI helpers), or `npm run check` to typecheck, run the tests, build both production and DEV scripts, syntax-check the generated artifacts, and verify i18n integrity (`scripts/check-i18n.mjs`) — the same sequence CI uses.
 
-Output: `dist/tamperina.user.js` — a single self-contained file. The mascot from `public/rina/logo.png` is inlined as a data URL at build time, so swap in your optimized PNG there and rebuild. The build trims transparent padding automatically (the original PNG has a lot of empty space around the head) and encodes every image in `public/rina/` as high-quality WebP with full alpha; your source files are never modified. Toasts use the available `applied`, `note`, `thumb`, `err` and `limited` stickers through an explicit variant map, with `applied` and then `logo` as fallbacks. The Cairo variable font (Arabic, Latin and Latin-ext subsets in `public/fonts/`) is also inlined and injected into `document.head`, so Arabic text renders in Cairo inside the Shadow DOM without depending on the host page.
+Output: `dist/tamperina.user.js` — a single self-contained file. Every `.png` / `.webp` in `public/rina/` (including `logo.png`) is downscaled to 256px, trimmed by scanning the alpha channel of that small copy, and encoded as WebP with full alpha (`quality: 95`, `alphaQuality: 100`) before being inlined as a data URL; source files are never modified. Stickers render at 120px (launcher) and 64px (toast), so 256px stays crisp at 2× DPR. Toasts use the available `applied`, `note`, `thumb`, `err` and `limited` stickers through an explicit variant map, with `applied` and then `logo` as fallbacks. The Cairo variable font (Arabic, Latin and Latin-ext subsets in `public/fonts/`) is also inlined; at runtime `ensureCairoFont()` decodes the woff2 bytes and registers three `FontFace` objects with `document.fonts.add()`, so Arabic text renders in Cairo inside the Shadow DOM without depending on the host page's CSP.
 
 Pushing a source change to `main` runs `.github/workflows/ci.yml`. It typechecks, runs the tests, builds both userscripts, syntax-checks them, verifies i18n catalog parity, and commits `dist/` back to `main` with `[skip ci]` so Tampermonkey's update URL always points at a fresh artifact. No manual upload is needed.
 
@@ -234,7 +234,8 @@ src/
     pageGuards.ts       run kinds ↔ page paths
     examGuards.ts       exam ids and exam input validation
     i18n/               Arabic + English catalogs
-    toast.ts, icons.ts  toasts and inline SVG icons
+    toast.ts            toasts and the sticker variant map
+  icons.ts              inline SVG icons (Lucide)
   ui/
     dom.ts              HTML escaping
     keyShield.ts        shadow-DOM keyboard retargeting
@@ -251,7 +252,7 @@ dist/                   generated userscripts (tracked, installed from here)
 |---|---|---|
 | Language | TypeScript 7 (strict) | Type safety across a large single-file build |
 | Build | Vite 8 + `vite-plugin-monkey` | Userscript headers, virtual asset modules, dev/prod builds |
-| Image pipeline | `sharp` | Trim transparent padding, encode WebP with alpha at build time |
+| Image pipeline | `sharp` | Downscale stickers to 256px, trim via alpha scan, encode WebP with alpha at build time |
 | Tests | Vitest 5 + `happy-dom` | Parsers, guards, storage, protocol, UI helpers |
 | Userscript API | `GM_getValue` / `GM_setValue` / `GM_*` listeners / `unsafeWindow` | Persistence, menu commands, shared controller |
 | UI | Shadow DOM + Cairo variable font | Isolation from the host page's CSS and CSP |

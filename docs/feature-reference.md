@@ -15,7 +15,7 @@ All toggles live in the **المفاتيح** (Toggles) tab. "Default" is the sta
 | إخفاء الباركود | Hide barcode | Off | Everywhere | `localStorage` — `tamperina_barcode_hidden` |
 | اختيار الطالب والاختصارات | Student select + hotkeys | On | `/evaluation` | `localStorage` — `tamperina_student-select` |
 | شريط البحث في التقييم | Evaluation find bar | On | `/evaluation` | `localStorage` — `tamperina_evaluation-find` |
-| أزرار تقييم الواجب | Homework buttons | Off (hard-disabled) | `/evaluation` | `localStorage` — `tamperina_homework-buttons`; `isFeatureEnabled()` always returns `false` in v0.0.22 |
+| أزرار تقييم الواجب | Homework buttons | Off (hard-disabled) | `/evaluation` | `localStorage` — `tamperina_homework-buttons`; `isFeatureEnabled()` always returns `false` in v0.0.23 |
 | لوحة حضور الامتحان القابلة للتعديل | Editable exam attendance stage | Off | Everywhere (table shown on `/comprehensive-exams/<id>`) | `GM_setValue` — field `examAttendanceStage` in `tamperina.shell.v1` |
 | إيقاف رسائل واتساب حتى الموافقة | Hold WhatsApp until approved | Off | Everywhere (notice on `/comprehensive-exams/*`) | `GM_setValue` — field `holdWhatsappUntilApproved` in `tamperina.shell.v1`, plus ownership marker `tamperina.whatsapp.heldByTamperina.v1` |
 | الأوامر الجماعية عن بُعد | Remote bulk actions | Off | Everywhere | `GM_setValue` — field `remoteBulk` in `tamperina.shell.v1`, mirrored into `tamperina.remoteBulk.v1` |
@@ -179,14 +179,14 @@ Commands are unregistered and re-registered on locale change so captions follow 
 
 | Variant | Sticker key | Typical use |
 |---|---|---|
-| `applied` | `applied` → `logo` fallback | Success, default variant |
-| `undo` | `undo` → `applied` fallback | Undo result |
-| `redo` | `redo` → `applied` fallback | Redo result |
-| `error` | `error` → `applied` fallback | Failed request or action |
-| `warning` | `warning` → `applied` fallback | Partial success, warning |
-| `info` | `info` → `applied` fallback | Selection, informational messages |
+| `applied` | `applied` | Success, default variant |
+| `undo` | `note` | Undo result |
+| `redo` | `thumb` | Redo result |
+| `error` | `err` | Failed request or action |
+| `warning` | `limited` | Partial success, warning |
+| `info` | `note` | Selection, informational messages |
 
-Maximum three visible; the oldest is dismissed when a fourth arrives. Optional action buttons dismiss the toast after running their handler.
+All variants fall back to `applied`, then `logo`, then an empty source. Maximum three visible; the oldest is dismissed when a fourth arrives. Optional action buttons dismiss the toast after running their handler.
 
 ---
 

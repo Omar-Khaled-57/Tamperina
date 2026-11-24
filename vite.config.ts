@@ -21,6 +21,53 @@ const cairoLatinRange = 'U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, 
 
 let rinaAssetsPromise: Promise<Record<string, string>> | undefined
 
+/* Stickers render at 120px (launcher) / 64px (toast), so 256px keeps them
+   crisp at 2x DPR while avoiding full-resolution WebP encodes at build time. */
+const rinaSize = 256
+const rinaAlphaCutoff = 5
+
+/**
+ * Trim transparent padding using the alpha channel of a downscaled copy.
+ * `sharp.trim()` on the 1254px originals cost ~2-3s per image in libvips;
+ * scanning the small raw buffer and cropping gives the same result in ~1ms
+ * because the art is downscaled anyway.
+ */
+async function trimmedWebp(input: Buffer): Promise<Buffer> {
+  const { data, info } = await sharp(input)
+    .resize({ width: rinaSize, height: rinaSize, fit: 'inside', withoutEnlargement: true })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true })
+
+  let left = info.width
+  let top = info.height
+  let right = 0
+  let bottom = 0
+  for (let y = 0; y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      if (data[(y * info.width + x) * info.channels + info.channels - 1] > rinaAlphaCutoff) {
+        if (x < left) left = x
+        if (x >= right) right = x + 1
+        if (y < top) top = y
+        if (y >= bottom) bottom = y + 1
+      }
+    }
+  }
+
+  const raw = { data, info }
+  const image = () => sharp(raw.data, {
+    raw: { width: raw.info.width, height: raw.info.height, channels: raw.info.channels },
+  })
+  const cropped = right > left && bottom > top
+    ? image().extract({ left, top, width: right - left, height: bottom - top })
+    : image()
+
+  return cropped
+    .resize({ width: rinaSize, height: rinaSize, fit: 'inside' })
+    .webp({ quality: 95, alphaQuality: 100, effort: 4 })
+    .toBuffer()
+}
+
 /** Build the Rina data-URL map once per Vite process, not once per load call. */
 function loadRinaAssets(): Promise<Record<string, string>> {
   if (!rinaAssetsPromise) {
@@ -32,10 +79,7 @@ function loadRinaAssets(): Promise<Record<string, string>> {
       const assets: Record<string, string> = {}
       for (const file of files) {
         const input = fs.readFileSync(path.join(dir, file))
-        const webp = await sharp(input)
-          .trim({ background: '#00000000', threshold: 5 })
-          .webp({ quality: 95, alphaQuality: 100, effort: 4 })
-          .toBuffer()
+        const webp = await trimmedWebp(input)
         assets[path.parse(file).name] = `data:image/webp;base64,${webp.toString('base64')}`
       }
       return assets
@@ -65,9 +109,9 @@ function rinaAssets() {
 
 /**
  * Inlines the Cairo variable font (Arabic, Latin and Latin-ext subsets) as
- * @font-face rules. Keeps the userscript self-contained; the CSS is injected
- * into document.head because Chrome/Firefox ignore @font-face declared only
- * inside a Shadow DOM stylesheet.
+ * @font-face rules. At runtime `ensureCairoFont()` decodes these bytes and
+ * registers three FontFace objects with document.fonts.add(), so the font
+ * works inside the Shadow DOM without touching the host page's stylesheet.
  */
 function cairoFontCss() {
   return {
