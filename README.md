@@ -6,7 +6,7 @@
 
 <div align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/Omar-Khaled-57/Tamperina/ci.yml?branch=main&style=flat-square&label=CI%2FCD" alt="CI/CD" />
-  <img src="https://img.shields.io/badge/version-0.0.23-blue?style=flat-square" alt="Version 0.0.23" />
+  <img src="https://img.shields.io/badge/version-0.0.24-blue?style=flat-square" alt="Version 0.0.24" />
   <img src="https://img.shields.io/badge/Tampermonkey-userscript-4c5a70?style=flat-square" alt="Tampermonkey userscript" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript strict" />
   <img src="https://img.shields.io/badge/Vite-8-646cff?style=flat-square&logo=vite&logoColor=white" alt="Vite 8" />
@@ -17,7 +17,7 @@
 
 <br />
 
-## <img src="public/rina/update.png" width="76" align="center" /> Latest release: 0.0.23
+## <img src="public/rina/update.png" width="76" align="center" /> Latest release: 0.0.24
 
 **One mascot, one modal, four tool families.** Tamperina ships as a single self-contained userscript: a pixel launcher that lives in the corner of the Ahmed Zakaria platform, a toggles panel, and a growing set of small workflow tools that all drive the platform's own forms and requests — never a separate backend.
 

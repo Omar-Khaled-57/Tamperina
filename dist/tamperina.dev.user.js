@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tamperina (DEV)
 // @namespace    https://github.com/Omar-Khaled-57/Tamperina
-// @version      0.0.23
+// @version      0.0.24
 // @author       Omar Khaled
 // @description  DEV build of Tamperina — live attendance + evaluation pages
 // @match        https://mrahmedzakaria.online/attendance/scan
@@ -3826,7 +3826,7 @@
 		return value.replace(/[\u0660-\u0669]/g, (char) => String(char.charCodeAt(0) - 1632)).replace(/[\u06F0-\u06F9]/g, (char) => String(char.charCodeAt(0) - 1776));
 	}
 	function normalizeLabel(value) {
-		return normalizeDigits$1(value).replace(/[\u0640\u200F\u200E]/g, "").replace(/[\u0622\u0623\u0625]/g, "ا").replace(/\u0649/g, "ي").replace(/\s+/g, " ").trim();
+		return normalizeDigits$1(value).replace(/[\u064B-\u065F\u0670]/g, "").replace(/[\u0640\u200F\u200E]/g, "").replace(/[\u0622\u0623\u0625]/g, "ا").replace(/\u0649/g, "ي").replace(/\s+/g, " ").trim();
 	}
 	function evaluationRows() {
 		return Array.from(document.querySelectorAll(GRADE_ROW_SELECTOR));

@@ -20,6 +20,14 @@ This changelog was started on **2026-11-21** at version **0.0.22**. Entries befo
 
 ---
 
+## <img src="public/rina/bug-fixed.png" width="100" align="center" /> [0.0.24] — 2026-11-24
+
+### Fixed
+
+- **Evaluation hotkey "جيد جدا"**: `normalizeLabel()` now strips Arabic tashkeel/harakat (`U+064B–U+065F`, `U+0670`) before comparing grade labels. Platform option text that includes diacritics (e.g. `جيد جدًا`) now matches the plain `جيد جدا` key, so the hotkey and grade-button classification work reliably.
+
+---
+
 ## <img src="public/rina/update.png" width="100" align="center" /> [0.0.23] — 2026-11-24
 
 ### Added
@@ -99,5 +107,5 @@ This changelog was started on **2026-11-21** at version **0.0.22**. Entries befo
 ---
 
 <div align="center">
-  <sub>Release notes for v0.0.23 · see <a href="docs/README.md">docs/</a> for the full manual.</sub>
+  <sub>Release notes for v0.0.24 · see <a href="docs/README.md">docs/</a> for the full manual.</sub>
 </div>

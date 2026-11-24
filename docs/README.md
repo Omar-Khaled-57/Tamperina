@@ -1,6 +1,6 @@
 # <img src="../public/rina/logo.png" width="80" align="center" /> Tamperina — Documentation
 
-Tamperina is a single-file Tampermonkey userscript that adds a pixel-mascot launcher, a settings modal, and a set of workflow tools to the Ahmed Zakaria platform. This directory describes the script **as it exists today** (version **0.0.23**).
+Tamperina is a single-file Tampermonkey userscript that adds a pixel-mascot launcher, a settings modal, and a set of workflow tools to the Ahmed Zakaria platform. This directory describes the script **as it exists today** (version **0.0.24**).
 
 <br />
 
@@ -102,5 +102,5 @@ Documentation images are referenced from source paths so GitHub can render them 
 <br />
 
 <div align="center">
-  <sub>Docs maintained for v0.0.23 — One Mascot, Four Tool Families.</sub>
+  <sub>Docs maintained for v0.0.24 — One Mascot, Four Tool Families.</sub>
 </div>

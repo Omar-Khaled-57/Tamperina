@@ -125,6 +125,7 @@ export function normalizeDigits(value: string): string {
 
 export function normalizeLabel(value: string): string {
   return normalizeDigits(value)
+    .replace(/[\u064B-\u065F\u0670]/g, '') // tashkeel/harakat — platform labels may include them
     .replace(/[\u0640\u200F\u200E]/g, '')
     .replace(/[\u0622\u0623\u0625]/g, '\u0627')
     .replace(/\u0649/g, '\u064A')
